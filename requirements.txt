@@ -1,0 +1,17 @@
+bitsandbytes
+transformers
+accelerate
+torch
+einops
+Pillow
+requests
+pandas
+chromadb
+sentence-transformers
+scikit-learn
+tqdm
+fastapi
+uvicorn[standard]
+python-multipart
+sqlmodel
+asyncpg

@@ -1,0 +1,48 @@
+@app.post("/search")
+async def search_similar_art(file: UploadFile = File(...)):
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents))
+    
+    # Usar función de búsqueda
+    results = buscar_imagenes_similares(image, n_results=3)
+    
+    # Analizar imagen con QWEN
+    try:
+        # Cargar las imágenes similares del disco
+        similar_images_bytes = []
+        similar_context = "Imágenes similares encontradas:\n"
+        
+        for idx, res in enumerate(results, 1):
+            similar_context += f"{idx}. {res['artist']} - {res['style']} ({res['similarity_score']}% similar)\n"
+            
+            # Cargar la imagen del disco
+            try:
+                # Construir ruta completa desde filepath en metadata
+                image_path = os.path.join(config.CARPETA_IMAGENES, res['image_url'].replace('/art/', ''))
+                with open(image_path, 'rb') as f:
+                    similar_images_bytes.append(f.read())
+            except Exception as e:
+                print(f"Error cargando imagen similar {image_path}: {e}")
+        
+        if results == []:
+            prompt = "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales, proporciona un análisis detallado."
+        else:
+            prompt = f"""Describe esta obra de arte (primera imagen) en detalle, incluyendo estilo, técnica, composición y elementos visuales.
+
+{similar_context}
+
+Estas son las imágenes similares encontradas en nuestra base de datos. Analiza la primera imagen y explica qué similitudes comparte con estas obras de referencia."""
+        
+        qwen_description = analizar_imagen_con_qwen_requests(
+            contents, 
+            prompt, 
+            similar_images=similar_images_bytes if similar_images_bytes else None
+        )
+    except Exception as e:
+        print(f"Error al llamar a QWEN: {e}")
+        qwen_description = None
+    
+    return {
+        "results": results,
+        "qwen_analysis": qwen_description
+    }
