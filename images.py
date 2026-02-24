@@ -90,7 +90,7 @@ embedder = SentenceTransformer('clip-ViT-L-14', device='cuda')
 embedder = embedder.half()
     
 @imagesRouter.post("/view")
-async def get_art_paginated(datos: PaginacionRequest, user: dict = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
     """
     Devuelve los elementos paginados.
     """
@@ -103,11 +103,12 @@ async def get_art_paginated(datos: PaginacionRequest, user: dict = Depends(get_c
     
     art = []
     id = offset
-    query = text("""SELECT * FROM images ORDER BY id LIMIT :limit OFFSET :offset""")
+    #Obtenemos solo las imagenes sin propietario (owner_id IS NULL) para mostrar en la galería pública, ordenadas por nombre
+    query = text("""SELECT * FROM images WHERE owner_id IS NULL ORDER BY name LIMIT :limit OFFSET :offset""")
     result = await session.execute(query, {"limit": limit, "offset": offset})
     rows = result.mappings().all()
 
-    count_query = text("SELECT COUNT(*) FROM images")
+    count_query = text("SELECT COUNT(*) FROM images WHERE owner_id IS NULL")
     total_result = await session.execute(count_query)
     collection_size = total_result.scalar()
 
@@ -128,6 +129,30 @@ async def get_art_paginated(datos: PaginacionRequest, user: dict = Depends(get_c
             "image_url": image_url
         })
     return {"art": art, "total_items": collection_size}
+
+@imagesRouter.get("/images/{image_id}")
+async def get_art_by_id(image_id: str, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+    """
+    Devuelve los detalles de una obra por su ID.
+    """
+    query = text("SELECT * FROM images WHERE id = :id AND (owner_id IS NULL OR owner_id = :user_id)")
+    result = await session.execute(query, {"id": image_id, "user_id": user})
+    row = result.mappings().first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    relative_path = row['local_route']
+    image_url = f"/art/{relative_path}"
+    
+    return {
+        "id": row['id'],
+        "name": row['name'],
+        "artist": row['artist'],
+        "style": row['style'],
+        "genre": row['genre'],
+        "image_url": image_url
+    }
 
 @imagesRouter.post("/find_art")
 async def find_art(query: str = Form(...), collection: Collection = Depends(get_chroma_collection)):

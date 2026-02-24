@@ -1,21 +1,19 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI, Response, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from jose import jwt, JWTError
-from requests import session
 from sentence_transformers import SentenceTransformer
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import config
 import torch
 import numpy as np
 import base64
 import logging
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from typing import Annotated, Optional
 import os
-from openai import AsyncOpenAI
 from images import imagesRouter
 from database import get_chroma_collection, view_database
 import firebase_admin
@@ -27,13 +25,10 @@ from firebase_admin.auth import verify_id_token
 from database import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-
 from google.oauth2 import id_token
 from google.auth.transport import requests
 import uuid
-from uuid import UUID
-from datetime import datetime, timedelta
-import json
+from datetime import datetime, timezone
 import os
 import io
 import base64
@@ -48,6 +43,54 @@ class UserData(BaseModel):
     name: str             # Obligatorio
     email: Optional[str] = None      # Opcional (puede ser None)
     avatar: Optional[str] = None  # Opcional (puede ser None)
+
+#         chat_dict['id'] = str(chat_dict['id'])
+#        chat_dict['user_id'] = str(chat_dict['user_id'])
+#        chat_dict['image_id'] = str(chat_dict['image_id'])
+#        chat_dict['created_at'] = chat_dict['created_at'].isoformat()
+#        chat_dict['local_route'] = chat_dict['local_route']
+#        chat_dict['image_name'] = chat_dict['image_name']
+#        chat_dict['image_url'] = f"/art/{chat_dict['local_route']}"
+#        chat_dict['last_message'] = chat_dict['last_message']
+
+class ChatModel(BaseModel):
+    id: str
+    user_id: str
+    image_id: Optional[str] = None
+    collection_id: Optional[str] = None
+    created_at: str
+
+    @model_validator(mode='after')
+    def check_exclusive_ids(self):
+        """Valida que solo uno de image_id o collection_id esté presente"""
+        has_image = self.image_id is not None
+        has_collection = self.collection_id is not None
+        
+        if has_image and has_collection:
+            raise ValueError("Un chat no puede tener image_id y collection_id simultáneamente")
+        
+        if not has_image and not has_collection:
+            raise ValueError("Un chat debe tener image_id o collection_id")
+        
+        return self
+
+class ImageModel(BaseModel):
+    id: str
+    name: Optional[str] = "Unknown"
+    artist: Optional[str] = "Unknown"
+    style: Optional[str] = "Unknown"
+    genre: Optional[str] = "Unknown"
+    year: Optional[str] = "Unknown"
+    owner_id: Optional[str] = None
+    image_url: str
+
+class CompleteChatResponse(BaseModel):
+    chat_info: Optional[ChatModel] = None
+    message_info: Optional[dict] = None
+    image_info: Optional[ImageModel] = None
+
+class ChatListResponse(BaseModel):
+    chats: list[ChatModel]
 
 class LoginResponse(BaseModel):
     id_token: Optional[str] = None
@@ -331,84 +374,216 @@ def preguntar_a_vllm(image_bytes: bytes, prompt: str) -> str:
     return response.choices[0].message.content
 
 @app.post("/analyze")
+async def search_similar_art_and_analyze(
+        file: Optional[UploadFile] = File(None), 
+    image_id : Optional[str] = Form(None), 
+    chat_id: Optional[str] = Form(None),
+    save_to_db: bool = Form(False),
+    user: str = Depends(get_current_user_id), 
+    session: AsyncSession = Depends(get_session),
+    is_new_chat: Optional[bool] = Form(False)
+):
+    print(f"Parametros recibidos - file: {file}, image_id: {image_id}, chat_id: {chat_id}, save_to_db: {save_to_db}, is_new_chat: {is_new_chat}")
+    if not file and not image_id and not chat_id:
+        raise HTTPException(status_code=400, detail="Debe proporcionar un archivo o una ruta.")
+    
+    if save_to_db:
+        chat_internal = None
+        image = None
+        if chat_id:
+            chat_data = await get_chat_with_id(session=session, chat_id=chat_id, user=user)
+            chat_internal = chat_data['id']
+            image_data = await get_image_with_id(session=session, image_id=chat_data['image_id'], user=user)
+            image_path = os.path.join(config.CARPETA_IMAGENES, image_data['image_url'])
+            if os.path.exists(image_path):
+                with open(image_path, 'rb') as img_file:
+                    current_image = img_file.read()
+                    image = Image.open(io.BytesIO(current_image))
+            else:
+                raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {image_data['image_url']}")
+        elif image_id:
+            chat_data = await create_chat_with_image(session=session, image_id=image_id, user=user)
+            chat_internal = chat_data['id']
+            image_data = await get_image_with_id(session=session, image_id=image_id, user=user)
+            image_path = os.path.join(config.CARPETA_IMAGENES, image_data['image_url'])
+            if os.path.exists(image_path):
+                with open(image_path, 'rb') as img_file:
+                    current_image = img_file.read()
+                    image = Image.open(io.BytesIO(current_image))
+            else:
+                raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {image_data['image_url']}")
+        elif file:
+            current_image = await file.read()
+            #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
+            image_data = await save_image_and_get_data(session=session, contents=current_image, user=user, commit=False)
+            savedImageId = image_data['id']
+            #Creamos el chat asociado a esta imagen y a este usuario
+            chat_data = await create_chat_with_image(session=session, image_id=savedImageId, user=user)
+            chat_internal = chat_data['id']
+            image = Image.open(io.BytesIO(current_image))
+
+        #Ahora insertamos el mensaje con la pregunta, sin hacer commit aún
+        message_data = await addMsg2BD(session=session, chat_id=chat_internal, response=False, content="Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales.", should_commit=False)
+        #Ahora lanzamos toda la parafernalia
+
+        results = buscar_imagenes_similares(image, n_results=3)
+
+        # Analizar imagen con QWEN
+        try:
+            qwen_description = analizar_imagen_con_qwen_requests(
+                current_image,
+                "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales. El formato debe ser Descripcion, Estilo, Técnica, Paleta de colores, Composición, Comparacion rapida con las similares en caso de haber.",
+                results
+            )
+        except Exception as e:
+            print(f"Error al llamar a QWEN: {e}")
+            # Si hay error y estamos guardando en BD, hacer rollback
+            await session.rollback()
+            raise HTTPException(status_code=500, detail="Error al procesar la imagen con QWEN")
+            
+        returned_message = await addMsg2BD(session=session, chat_id=chat_internal, response=True, content=qwen_description or "Error al analizar la imagen con QWEN.", should_commit=False)
+        
+        await add_related_images_2_db(message_id=returned_message['id'], related_images=results, session=session, should_commit=True)
+        
+        await session.commit()
+
+        returned_message['related_images'] = results
+
+        res_img = ImageModel(
+            id=image_data['id'],
+            name=image_data['name'],
+            artist=image_data['artist'],
+            style=image_data['style'],
+            genre=image_data['genre'],
+            year=image_data['year'],
+            owner_id=image_data['owner_id'],
+            image_url=f"/art/{image_data['image_url']}"
+        )
+        
+        res_chat = ChatModel(
+            id=chat_data['id'],
+            user_id=chat_data['user_id'],
+            image_id=chat_data['image_id'],
+            #collection_id=chat_data['collection_id'],
+            created_at=chat_data['created_at']
+        )
+
+        response = CompleteChatResponse(
+            chat_info=res_chat if is_new_chat else None,
+            message_info=returned_message,
+            image_info=res_img if is_new_chat else None
+        )
+
+        print(f"RESPUESTA FINAL QUE SE ENVIA AL FRONT: {response}")
+
+        return response
+    else:
+        if image_id:
+            #TODO el metodo para obtener la imagen a partir de una existente y no guardar en BD el chat.
+            print("TODO")
+        elif file:
+            current_image = await file.read()
+            image = Image.open(io.BytesIO(current_image))
+
+        #Ahora lanzamos toda la parafernalia
+
+        results = buscar_imagenes_similares(image, n_results=3)
+
+        # Analizar imagen con QWEN
+        try:
+            qwen_description = analizar_imagen_con_qwen_requests(
+                current_image,
+                "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales. El formato debe ser Descripcion, Estilo, Técnica, Paleta de colores, Composición, Comparacion rapida con las similares en caso de haber.",
+                results
+            )
+        except Exception as e:
+            print(f"Error al llamar a QWEN: {e}")
+            # Si hay error y estamos guardando en BD, hacer rollback
+            raise HTTPException(status_code=500, detail="Error al procesar la imagen con QWEN")
+            
+        response = CompleteChatResponse(
+            chat_info=None,
+            image_info=None,
+            message_info={
+                "content": qwen_description,
+                "related_images": results
+            }
+        )
+
+
+        return response
+
+
+@app.post("/analyze2")
 async def search_similar_art(
     file: Optional[UploadFile] = File(None), 
     image_id : Optional[str] = Form(None), 
-    save_to_db: bool = Form(True),
+    chat_id: Optional[str] = Form(None),
+    save_to_db: bool = Form(False),
     user: dict = Depends(get_current_user_id), 
     session: AsyncSession = Depends(get_session)
 ):
+    print(f"Parametros recibidos - file: {file}, image_id: {image_id}, chat_id: {chat_id}, save_to_db: {save_to_db}")
     #Aqui me cargo el endpoint si no me llega ni un archivo ni un ID.
-    if not file and not image_id:
+    if not file and not image_id and not chat_id:
         raise HTTPException(status_code=400, detail="Debe proporcionar un archivo o una ruta.")
     #Aqui elegimos la imagen a analizar, priorizando hacerlo mediante el ID sobre el archivo subido. (Aqui suponemos que el usuario quiere analizar una imagen que ya esta en bd, ya sea por ser de las disponibles en el sistema o por haberla subido el)
     image = None
     new_id = None
+    current_image = None
     #Aqui se entra de forma prioritaria si se ha proporcionado un ID
-    if image_id:
-        #query = text("SELECT local_route FROM images WHERE id = :id")
-        query = text("SELECT local_route FROM images WHERE id = :id AND (owner_id = :user_id OR owner_id IS NULL)")
-        #result = await session.execute(query, {"id": image_id})
-        result = await session.execute(query, {"id": image_id, "user_id": user})
-        image_db = result.mappings().one_or_none()
-        route = None
+    if chat_id:
+        print(f"Chat ID recibido: {chat_id}, buscando imagen asociada...")
+        current_id = chat_id
+        local_route = await get_image_asociated_to_chat(chat_id=chat_id, user=user, session=session)
+
+        #Ahora busco y cargo la imagen, ya que el LLM la quiere en Bytes... Si no existe, pues 404 y listo
+        image_path = os.path.join(config.CARPETA_IMAGENES, local_route)
+        if os.path.exists(image_path):
+            with open(image_path, 'rb') as img_file:
+                current_image = img_file.read()
+        else:
+            raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {local_route}")
+        
+    #Aqui entramos si se ha proporcionado un ID de una imagen que ya existe en el sistema
+    elif image_id:
+        image_db = get_image_with_id(session=session, image_id=image_id, user=user)
         full_path = None
         new_id = image_id
         if image_db:
-                route = image_db['local_route']
-                print(f"Ruta de la imagen: {route}")
-                full_path = os.path.join(config.CARPETA_IMAGENES, route)
+                print(f"Ruta de la imagen: {image_db['local_route']}")
+                full_path = os.path.join(config.CARPETA_IMAGENES, image_db['local_route'])
                 if os.path.exists(full_path):
                     with open(full_path, 'rb') as img_file:
-                        contents = img_file.read()
-                        image = Image.open(io.BytesIO(contents))
+                        current_image = img_file.read()
+                        image = Image.open(io.BytesIO(current_image))
                 else:
-                    raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {route}")
+                    raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {image_db['local_route']}")
         else:
             raise HTTPException(status_code=404, detail=f"No se encontró la imagen con ID: {image_id}")
-    #Aqui entramos si se ha proporcionado un archivo y no un ID  
+    #Aqui entramos si se ha proporcionado un archivo
     elif file:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents))
+        current_image = await file.read()
+        image = Image.open(io.BytesIO(current_image))
         if save_to_db:
             #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
-            new_id = str(uuid.uuid4())
-            with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
-                img_file.write(contents)
-            query = text("""INSERT INTO images (id, local_route, owner_id) 
-                        VALUES (:id, :local_route, :owner_id) RETURNING id""")
-            result = await session.execute(query, {
-                "id": new_id,
-                "local_route": f"User/{new_id}.jpg",
-                "owner_id": user
-            })
-            await session.commit()
+            savedImageId = await save_image_and_get_id(session=session, contents=current_image, user=user, commit=False)
+            new_id = savedImageId
     #HASTA AQUI LA BUSQUEDA/SUBIDA DE LA IMAGEN, AHORA CREAMOS O OBTENEMOS EL ID DEL CHAT SI SE HA PEDIDO GUARDAR EN BD
     chat_id = None
-    question_time = datetime.now()
-    
+        
     if save_to_db:
-        query_chat = text("""INSERT INTO chats (id, user_id, image_id) VALUES (:id, :user_id, :image_id) ON CONFLICT (user_id, image_id) DO UPDATE SET id=chats.id RETURNING id""")
-        result_chat = await session.execute(query_chat, {
-        "id": str(uuid.uuid4()),
-        "user_id": user,
-        "image_id": new_id
-        })
-        chat_id = result_chat.scalar_one()
+        chat_data = await create_chat_with_image(session=session, image_id=new_id, user=user)
         # Insertar pregunta con timestamp explícito (sin commit aún)
-        query_msg = text("""INSERT INTO messages (chat_id, response, content, created_at) VALUES (:chat_id, :response, :content, :created_at)""")
-        await session.execute(query_msg, {
-            "chat_id": chat_id,
-            "response": False,
-            "content": "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales.",
-            "created_at": question_time
-        })
+        message_data = addMsg2BD(session=session, chat_id=chat_data['id'], response=False, content="Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales.", should_commit=False)
 
+    image = Image.open(io.BytesIO(current_image))
     results = buscar_imagenes_similares(image, n_results=3)
+
     # Analizar imagen con QWEN
     try:
         qwen_description = analizar_imagen_con_qwen_requests(
-            contents,
+            current_image,
             "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales. El formato debe ser Descripcion, Estilo, Técnica, Paleta de colores, Composición, Comparacion rapida con las similares en caso de haber.",
             #"Traduce a varios idiomas \"The Starry Night\" de Vincent van Gogh en el formato JSON con las claves 'español', 'inglés', 'francés', 'alemán', 'italiano', 'chino' y 'japonés'.",
             results
@@ -420,21 +595,18 @@ async def search_similar_art(
         if save_to_db:
             await session.rollback()
             raise HTTPException(status_code=500, detail="Error al procesar la imagen con QWEN")
-    
+        
+    if save_to_db:
+        returned_message = await addMsg2BD(session=session, chat_id=current_id, response=True, content=qwen_description or "Error al analizar la imagen con QWEN.", should_commit=False)
+        session.commit()
+
     response = {
         "results": results,
         "qwen_analysis": qwen_description
     }
 
     if save_to_db:
-        # Timestamp de respuesta (mínimo 1 segundo después de la pregunta)
-        answer_time = max(datetime.now(), question_time + timedelta(seconds=1))
-        await session.execute(query_msg, {
-            "chat_id": chat_id,
-            "response": True,
-            "content": qwen_description or "Error al analizar la imagen con QWEN.",
-            "created_at": answer_time
-        })
+        response_data = await addMsg2BD(session=session, chat_id=chat_data['id'], response=True, content=qwen_description or "Error al analizar la imagen con QWEN.", should_commit=False)
         # Un solo commit al final - transacción atómica
         await session.commit()
 
@@ -682,8 +854,55 @@ async def question_answer(
         "qwen_analysis": qwen_description
     }
 
+@app.get("/me/chats/{chat_id}")
+async def get_chat_details(chat_id: str, user: dict = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+    query_chat = text("""
+        SELECT C.*, i.local_route, i.name AS image_name
+        FROM chats AS C 
+        INNER JOIN images AS i ON C.image_id = i.id
+        WHERE C.id = :chat_id AND C.user_id = :user_id
+    """)
+    result_chat = await session.execute(query_chat, {"chat_id": chat_id, "user_id": user})
+    chat = result_chat.mappings().one_or_none()
+    
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat no encontrado o no pertenece al usuario")
+    
+    chat_dict = dict(chat)
+    chat_details = ChatModel(
+        id=str(chat_dict['id']), 
+        user_id=str(chat_dict['user_id']), 
+        image_id=str(chat_dict['image_id']), 
+        collection_id="",
+        created_at=chat_dict['created_at'].isoformat(),
+    )
+    
+    return chat_details
+
 @app.get("/me/chats")
-async def get_user_chats(last_date : Optional[str] = Form(None), user: dict = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+async def get_user_chats(last_date : Optional[str] = None, user: dict = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)) -> ChatListResponse:
+    query_chats = text("""
+        SELECT C.*
+        FROM chats AS C WHERE C.user_id = :user_id
+        ORDER BY C.created_at DESC
+    """)
+    result_chats = await session.execute(query_chats, {"user_id": user, "last_date": last_date})
+    chats = result_chats.mappings().all()
+    chatsRes = ChatListResponse(chats=[])
+    for chat in chats:
+        chat_dict = dict(chat)
+        new_chat = ChatModel(
+            id=str(chat_dict['id']), 
+            user_id=str(chat_dict['user_id']), 
+            image_id=str(chat_dict['image_id']), 
+            created_at=chat_dict['created_at'].isoformat(), 
+        )
+        chatsRes.chats.append(new_chat)
+    print(f"Chats encontrados para el usuario {user}: {chatsRes}")
+    return chatsRes
+
+@app.get("/me/chats2")
+async def get_user_chats(last_date : Optional[str] = None, user: dict = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)) -> ChatListResponse:
     query_chats = text("""
         SELECT C.*, i.local_route, i.name AS image_name, m.content as last_message
         FROM chats AS C 
@@ -698,28 +917,28 @@ async def get_user_chats(last_date : Optional[str] = Form(None), user: dict = De
         WHERE C.user_id = :user_id
         ORDER BY C.created_at DESC
     """)
-    #query_chats = text("SELECT C.*, i.local_route, i.name AS image_name FROM chats AS C INNER JOIN images AS i ON C.image_id = i.id WHERE C.user_id = :user_id")
-    result_chats = await session.execute(query_chats, {"user_id": user})
+    result_chats = await session.execute(query_chats, {"user_id": user, "last_date": last_date})
     chats = result_chats.mappings().all()
-    chatsRes = []
+    chatsRes = ChatListResponse(chats=[])
     for chat in chats:
         chat_dict = dict(chat)
-        print(f"Chat raw data: {chat_dict}")
-        chat_dict['id'] = str(chat_dict['id'])
-        chat_dict['user_id'] = str(chat_dict['user_id'])
-        chat_dict['image_id'] = str(chat_dict['image_id'])
-        chat_dict['created_at'] = chat_dict['created_at'].isoformat()
-        chat_dict['local_route'] = chat_dict['local_route']
-        chat_dict['image_name'] = chat_dict['image_name']
-        chat_dict['image_url'] = f"/art/{chat_dict['local_route']}"
-        chat_dict['last_message'] = chat_dict['last_message']
-        chatsRes.append(chat_dict)
+        new_chat = ChatModel(
+            id=str(chat_dict['id']), 
+            user_id=str(chat_dict['user_id']), 
+            image_id=str(chat_dict['image_id']), 
+            created_at=chat_dict['created_at'].isoformat(), 
+            local_route=chat_dict['local_route'], 
+            image_name=chat_dict['image_name'], 
+            image_url=f"/art/{chat_dict['local_route']}", 
+            last_message=chat_dict['last_message']
+        )
+        chatsRes.chats.append(new_chat)
     print(f"Chats encontrados para el usuario {user}: {chatsRes}")
-    return {"chats": chatsRes}
+    return chatsRes
 
-@app.get("/chats/{chat_id}/messages")
+@app.get("/chats/messages")
 async def get_chat_messages(
-    chat_id: str,
+    chat_id: Optional[str] = None,
     user: dict = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_session)
 ):
@@ -741,13 +960,42 @@ async def get_chat_messages(
     """)
     result_msgs = await session.execute(query_msgs, {"chat_id": chat_id})
     messages = result_msgs.mappings().all()
-    
+
     messages_res = []
     for msg in messages:
         msg_dict = dict(msg)
         msg_dict['id'] = str(msg_dict['id'])
         msg_dict['chat_id'] = str(msg_dict['chat_id'])
         msg_dict['created_at'] = msg_dict['created_at'].isoformat()
+        
+        # Obtener imágenes relacionadas con este mensaje
+        query_related = text("""
+            SELECT ri.id as relation_id, ri.similarity, 
+                   i.id, i.local_route, i.name, i.artist, i.style, i.genre, i.year
+            FROM related_images ri
+            JOIN images i ON ri.image_id = i.id
+            WHERE ri.message_id = :message_id
+            ORDER BY ri.similarity DESC
+        """)
+        result_related = await session.execute(query_related, {"message_id": msg['id']})
+        related_images = result_related.mappings().all()
+        
+        # Formatear imágenes relacionadas
+        related_images_list = []
+        for img in related_images:
+            img_dict = {
+                'id': str(img['id']),
+                'name': img['name'],
+                'artist': img['artist'],
+                'style': img['style'],
+                'genre': img['genre'],
+                'year': img['year'],
+                'similarity_score': float(img['similarity']),
+                'image_url': f"/art/{img['local_route']}"
+            }
+            related_images_list.append(img_dict)
+        
+        msg_dict['related_images'] = related_images_list
         messages_res.append(msg_dict)
     
     return {"messages": messages_res}
@@ -757,168 +1005,85 @@ async def send_message(
     file: Optional[UploadFile] = File(None), 
     image_id : Optional[str] = Form(None), 
     chat_id: Optional[str] = Form(None),
-    save_to_db: bool = Form(True),
     question: str = Form(...),
     user: dict = Depends(get_current_user_id), 
     session: AsyncSession = Depends(get_session)
 ):
+    #Imprimo los parametros recibidos para verificar lo que llega al endpoint
+    print(f"Parametros recibidos - file: {file}, image_id: {image_id}, chat_id: {chat_id}, question: {question}")
     #Aqui me cargo el endpoint si no me llega ni un archivo ni un ID.
     if not file and not image_id and not chat_id:
         raise HTTPException(status_code=400, detail="Debe proporcionar un archivo, una ruta o un id.")
-    image = None
-    new_id = None
-
-    #Voy a hacer lo siguiente, hasta ahora solo se creaban chats, ahora tambien podemos enviar preguntas a chats ya existentes, para eso se puede enviar el chat_id, 
-    #si se envia el chat_id se ignora el image_id y el file, y se asume que la pregunta es sobre la imagen de ese chat, si no se envia el chat_id entonces 
-    # se sigue el proceso normal de buscar o subir la imagen y crear un nuevo chat. 
+    current_image = None
+    current_id = None
+    #Empezamos priorizando el chat existente, por si se cuelan otros parametros.
     if chat_id:
         # Buscamos que el chat exista y sea del usuario recibido
-
+        current_id = chat_id
         local_route = await get_image_asociated_to_chat(chat_id=chat_id, user=user, session=session)
-
-        # query_chat = text("SELECT image_id FROM chats WHERE id = :chat_id AND user_id = :user_id")
-        # result_chat = await session.execute(query_chat, {"chat_id": chat_id, "user_id": user})
-        # chat_db = result_chat.mappings().one_or_none()
-        # if not chat_db:
-        #     raise HTTPException(status_code=404, detail="Chat no encontrado o no pertenece al usuario")
-        # # Si el chat existe, cogemos la imagen asociada
-        # image_id = chat_db['image_id']
-        # query_img = text("SELECT local_route FROM images WHERE id = :id")
-        # result_img = await session.execute(query_img, {"id": image_id})
-        # image_db = result_img.mappings().one_or_none()
-        # if not image_db:
-        #     raise HTTPException(status_code=404, detail="Imagen asociada al chat no encontrada")
-        # local_route = image_db['local_route']
-
-        # if local_route == prueba:
-        #     print("La función get_image_asociated_to_chat devuelve la misma ruta que la consulta directa a la BD, todo correcto.")
-
-        #Ahora guardo el mensaje del cliente en la bd y cojo su ID por si acaso
-        question_msg = await addMsg2BD(session=session, chat_id=chat_id, response=False, content=question, should_commit=False)
 
         #Ahora busco y cargo la imagen, ya que el LLM la quiere en Bytes... Si no existe, pues 404 y listo
         image_path = os.path.join(config.CARPETA_IMAGENES, local_route)
         if os.path.exists(image_path):
             with open(image_path, 'rb') as img_file:
-                contents = img_file.read()
-                image = Image.open(io.BytesIO(contents))
+                current_image = img_file.read()
         else:
             raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {local_route}")
-        
-        #Ahora si, llego el momento de llamar al LLM con la imagen y la pregunta
-        try:
-            qwen_description = preguntar_a_vllm(
-                contents,
-                question
-            )
-        except Exception as e:
-            print(f"Error al llamar a QWEN: {e}")
-            qwen_description = None
-
-        #Guardo la respuesta del LLM en la base de datos.
-        returned_message = await addMsg2BD(session=session, chat_id=chat_id, response=True, content=qwen_description or "Error al analizar la imagen con QWEN.", should_commit=False)
-
-        # Finalmente commiteamos todo, para evitar tener mensajes sin respuesta.
-        await session.commit()
-
-        return returned_message
-    else:
-        #Aqui elegimos la imagen a analizar, priorizando hacerlo mediante el ID sobre el archivo subido. (Aqui suponemos que el usuario quiere analizar una imagen que ya esta en bd, ya sea por ser de las disponibles en el sistema o por haberla subido el)
-        #Aqui se entra de forma prioritaria si se ha proporcionado un ID
-        if image_id:
-            #query = text("SELECT local_route FROM images WHERE id = :id")
-            query = text("SELECT local_route FROM images WHERE id = :id AND (owner_id = :user_id OR owner_id IS NULL)")
-            #result = await session.execute(query, {"id": image_id})
-            result = await session.execute(query, {"id": image_id, "user_id": user})
-            image_db = result.mappings().one_or_none()
-            route = None
-            full_path = None
-            new_id = image_id
-            if image_db:
-                    route = image_db['local_route']
-                    print(f"Ruta de la imagen: {route}")
-                    full_path = os.path.join(config.CARPETA_IMAGENES, route)
-                    if os.path.exists(full_path):
-                        with open(full_path, 'rb') as img_file:
-                            contents = img_file.read()
-                            image = Image.open(io.BytesIO(contents))
-                    else:
-                        raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {route}")
+    #Ahora pasamos al caso en que recibimos el ID de una imagen, comprobamos si existe y si pertenece a un chat actual
+    elif image_id:
+        print(f"Buscando imagen asociada al id: {image_id} para el usuario {user}")
+        recovered_image = await get_image_with_id(session=session, image_id=image_id, user=user)
+        if recovered_image:
+            print(f"Imagen recuperada con ID {image_id} para el usuario {user}")
+            chat_db = await get_chat_by_image_and_user(session=session, image_id=image_id, user=user)
+            if chat_db:
+                print(f"Chat encontrado para la imagen ID {image_id}: {chat_db}")
+                current_id = chat_db['id']
             else:
-                raise HTTPException(status_code=404, detail=f"No se encontró la imagen con ID: {image_id}")
-        #Aqui entramos si se ha proporcionado un archivo y no un ID  
-        elif file:
-            contents = await file.read()
-            image = Image.open(io.BytesIO(contents))
-            if save_to_db:
-                #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
-                new_id = str(uuid.uuid4())
-                with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
-                    img_file.write(contents)
-                query = text("""INSERT INTO images (id, local_route, owner_id) 
-                            VALUES (:id, :local_route, :owner_id) RETURNING id""")
-                result = await session.execute(query, {
-                    "id": new_id,
-                    "local_route": f"User/{new_id}.jpg",
-                    "owner_id": user
-                })
-                await session.commit()
-        #HASTA AQUI LA BUSQUEDA/SUBIDA DE LA IMAGEN, AHORA CREAMOS O OBTENEMOS EL ID DEL CHAT SI SE HA PEDIDO GUARDAR EN BD
-        chat_id = None
-        question_time = datetime.now()
-        
-        if save_to_db:
-            query_chat = text("""INSERT INTO chats (id, user_id, image_id) VALUES (:id, :user_id, :image_id) ON CONFLICT (user_id, image_id) DO UPDATE SET id=chats.id RETURNING id""")
-            result_chat = await session.execute(query_chat, {
-            "id": str(uuid.uuid4()),
-            "user_id": user,
-            "image_id": new_id
-            })
-            chat_id = result_chat.scalar_one()
-            # Insertar pregunta con timestamp explícito (sin commit aún)
-            query_msg = text("""INSERT INTO messages (chat_id, response, content, created_at) VALUES (:chat_id, :response, :content, :created_at)""")
-            await session.execute(query_msg, {
-                "chat_id": chat_id,
-                "response": False,
-                "content": "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales.",
-                "created_at": question_time
-            })
+                #Creamos el chat asociado a esta imagen y a este usuario
+                print(f"No se encontró un chat asociado a la imagen ID {image_id} para el usuario {user}")
+                chat_db = await create_chat_with_image(session=session, image_id=image_id, user=user)
+                current_id = chat_db['id']
+            
+            #Ahora busco y cargo la imagen, ya que el LLM la quiere en Bytes... Si no existe, pues 404 y listo
+            image_path = os.path.join(config.CARPETA_IMAGENES, recovered_image['local_route'])
+            if os.path.exists(image_path):
+                with open(image_path, 'rb') as img_file:
+                    current_image = img_file.read()
+            else:
+                raise HTTPException(status_code=404, detail=f"Imagen no encontrada en el servidor: {recovered_image['local_route']}")  
+    #Acabamos con el caso de un archivo nuevo.
+    elif file:
+        #Pues aqui debemos subir la imagen, guardarla en la bd, crear el chat, guardar la pregunta, llamar al LLM y guardar la respuesta...
+        current_image = await file.read()
+        #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
+        savedImageId = await save_image_and_get_id(session=session, contents=current_image, user=user, commit=False)
 
-        results = buscar_imagenes_similares(image, n_results=3)
-        # Analizar imagen con QWEN
-        try:
-            qwen_description = analizar_imagen_con_qwen_requests(
-                contents,
-                "Describe esta obra de arte en detalle, incluyendo estilo, técnica, composición y elementos visuales. El formato debe ser Descripcion, Estilo, Técnica, Paleta de colores, Composición, Comparacion rapida con las similares en caso de haber.",
-                #"Traduce a varios idiomas \"The Starry Night\" de Vincent van Gogh en el formato JSON con las claves 'español', 'inglés', 'francés', 'alemán', 'italiano', 'chino' y 'japonés'.",
-                results
-            )
-        except Exception as e:
-            print(f"Error al llamar a QWEN: {e}")
-            qwen_description = None
-            # Si hay error y estamos guardando en BD, hacer rollback
-            if save_to_db:
-                await session.rollback()
-                raise HTTPException(status_code=500, detail="Error al procesar la imagen con QWEN")
-        
-        response = {
-            "results": results,
-            "qwen_analysis": qwen_description
-        }
+        #Creamos el chat asociado a esta imagen y a este usuario
+        chat_data = await create_chat_with_image(session=session, image_id=savedImageId, user=user)
+        current_id = chat_data['id']
+    # Insertar pregunta con timestamp explícito (sin commit aún)
+    message_data = await addMsg2BD(session=session, chat_id=current_id, response=False, content=question, should_commit=False)
 
-        if save_to_db:
-            # Timestamp de respuesta (mínimo 1 segundo después de la pregunta)
-            answer_time = max(datetime.now(), question_time + timedelta(seconds=1))
-            await session.execute(query_msg, {
-                "chat_id": chat_id,
-                "response": True,
-                "content": qwen_description or "Error al analizar la imagen con QWEN.",
-                "created_at": answer_time
-            })
-            # Un solo commit al final - transacción atómica
-            await session.commit()
+    #Ahora si, llego el momento de llamar al LLM con la imagen y la pregunta
+    try:
+        qwen_description = preguntar_a_vllm(
+            current_image,
+            question
+        )
+    except Exception as e:
+        print(f"Error al llamar a QWEN: {e}")
+        qwen_description = None
+        raise HTTPException(status_code=500, detail="Error al procesar la imagen con QWEN")
 
-        return response
+    #Guardo la respuesta del LLM en la base de datos.
+    returned_message = await addMsg2BD(session=session, chat_id=current_id, response=True, content=qwen_description or "Error al analizar la imagen con QWEN.", should_commit=False)
+
+    # Finalmente commiteamos todo, para evitar tener mensajes sin respuesta.
+    await session.commit()
+
+    # Devuelvo al cliente la respuesta del LLM
+    return returned_message
 
 async def addMsg2BD(session, chat_id, response, content, should_commit=False):
     # Insertar mensaje con timestamp explícito (sin commit aún)
@@ -946,10 +1111,39 @@ async def addMsg2BD(session, chat_id, response, content, should_commit=False):
 
     return returned_message
 
+async def get_chat_by_image_and_user(image_id, user, session) -> Optional[dict]:
+    query_chat = text("SELECT * FROM chats WHERE image_id = :image_id and user_id = :user_id")
+    result_chat = await session.execute(query_chat, {"image_id": image_id, "user_id": user})
+    chat_db = result_chat.mappings().one_or_none()
+    if not chat_db:
+        return None
+    print(f"Chat encontrado para la imagen ID {image_id} y usuario {user}: {chat_db}")
+    return chat_db
+
+async def create_chat_with_image(image_id, user, session):
+    chat_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc)
+    query_chat = text("""INSERT INTO chats (id, user_id, image_id, created_at) VALUES (:id, :user_id, :image_id, :created_at) ON CONFLICT (user_id, image_id) DO UPDATE SET id=chats.id RETURNING id""")
+    result_chat = await session.execute(query_chat, {
+    "id": chat_id,
+    "user_id": user,
+    "image_id": image_id,
+    "created_at": created_at
+    })
+    chat_db = {
+        "id": chat_id,
+        "user_id": user,
+        "image_id": image_id,
+        "created_at": created_at.isoformat(),
+        "topic": ""
+    }
+    print(f"Chat creado para la imagen ID {image_id} y usuario {user}: {chat_db}")
+    return chat_db
+
 async def get_image_asociated_to_chat(chat_id, user, session):
     # Primero buscamos el chat para ver si existe y obtener el ID de la imagen asociada
-    query_chat = text("SELECT image_id FROM chats WHERE id = :chat_id")
-    result_chat = await session.execute(query_chat, {"chat_id": chat_id})
+    query_chat = text("SELECT image_id FROM chats WHERE id = :chat_id and user_id = :user_id")
+    result_chat = await session.execute(query_chat, {"chat_id": chat_id, "user_id": user})
     chat_db = result_chat.mappings().one_or_none()
 
     #Si el chat no existe, devolvemos un error 404
@@ -958,14 +1152,109 @@ async def get_image_asociated_to_chat(chat_id, user, session):
     
     # Si el chat existe, cogemos el id de la imagen asociada y la buscamos en la tabla de imágenes para obtener sus datos
     image_id = chat_db['image_id']
-    query_img = text("SELECT local_route FROM images WHERE id = :id and (owner_id = :user_id)")
-    result_img = await session.execute(query_img, {"id": image_id, "user_id": user})
-    image_db = result_img.mappings().one_or_none()
-
-    #Si no encontramos la imagen, devcolvemos un error 404, aunque no deberia pasar nunca si la BD es consistente...
-    if not image_db:
-        raise HTTPException(status_code=404, detail="Imagen asociada al chat no encontrada")
+    image_db = await get_image_with_id(image_id=image_id, session=session, user=user)
     
-    #Si todo va bien, devolvemos todos los datos de la imagen
+    #Si todo va bien, de momento, devolvemos unicamente la ruta local
     local_route = image_db['local_route']
     return local_route
+
+async def save_image_and_get_id(contents, user, commit, session):
+    #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
+    new_id = str(uuid.uuid4())
+    with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
+        img_file.write(contents)
+    local_route = f"User/{new_id}.jpg"
+    query = text("""INSERT INTO images (id, local_route, owner_id) 
+                VALUES (:id, :local_route, :owner_id) RETURNING id""")
+    result = await session.execute(query, {
+        "id": new_id,
+        "local_route": local_route,
+        "owner_id": user
+    })
+    if commit:
+        await session.commit()
+
+    return result.scalar_one()
+
+async def save_image_and_get_data(contents, user, commit, session):
+    #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
+    new_id = str(uuid.uuid4())
+    with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
+        img_file.write(contents)
+    local_route = f"User/{new_id}.jpg"
+    query = text("""INSERT INTO images (id, local_route, owner_id) 
+                VALUES (:id, :local_route, :owner_id) RETURNING id""")
+    result = await session.execute(query, {
+        "id": new_id,
+        "local_route": local_route,
+        "owner_id": user
+    })
+    if commit:
+        await session.commit()
+    image_data = {
+        "id": new_id,
+        "image_url": local_route,
+        "owner_id": user,
+        "name": "Unknown",
+        "artist": "Unknown",
+        "style": "Unknown",
+        "genre": "Unknown",
+        "year": "Unknown"
+    }
+    return image_data
+
+async def get_image_with_id(image_id, session, user=None):
+    query_img = text("SELECT * FROM images WHERE id = :id and (owner_id = :user_id OR owner_id IS NULL)")
+    result_img = await session.execute(query_img, {"id": image_id, "user_id": user})
+    image_db = result_img.mappings().one_or_none()
+    print(f"Resultado de la consulta de imagen con ID {image_id}: {image_db}")
+    if not image_db:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    image_data = {
+        "id": str(image_db['id']),
+        "image_url": image_db['local_route'],
+        "owner_id": str(image_db['owner_id']),
+        "name": image_db['name'],
+        "artist": image_db['artist'],
+        "style": image_db['style'],
+        "genre": image_db['genre'],
+        "year": image_db['year']
+        
+    }
+
+    image_model = ImageModel(
+        id = str(image_db['id']),
+        image_url = image_db['local_route'],
+        owner_id = str(image_db['owner_id']),
+        name = image_db['name'],
+        artist = image_db['artist'],
+        style = image_db['style'],
+        genre = image_db['genre'],
+        year = image_db['year']
+    )
+    print("\n--------------------\n")
+    print(f"Imagen modelada con ID {image_id}: {image_model}")
+    print("\n--------------------\n")
+
+    return image_data
+
+async def get_chat_with_id(chat_id, session, user):
+    query_chat = text("SELECT * FROM chats WHERE id = :id and user_id = :user_id")
+    result_chat = await session.execute(query_chat, {"id": chat_id, "user_id": user})
+    chat_db = result_chat.mappings().one_or_none()
+    print(f"Resultado de la consulta de chat con ID {chat_id}: {chat_db}")
+    if not chat_db:
+        raise HTTPException(status_code=404, detail="Chat no encontrado")
+    return chat_db
+
+async def add_related_images_2_db(message_id, related_images, session, should_commit=False):
+    final_related_images = []
+    for img in related_images:
+        print(f"Guardando imagen relacionada en la BD: {img}")
+        query = text("INSERT INTO related_images (message_id, image_id, similarity) VALUES (:message_id, :image_id, :similarity) returning id")
+        result = await session.execute(query, {"message_id": message_id, "image_id": img['id'], "similarity": img['similarity_score']})
+        img_id = result.scalar_one()
+        print(f"Inserted related image with ID: {img_id}")
+
+    if should_commit:
+        await session.commit()

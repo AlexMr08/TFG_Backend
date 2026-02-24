@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS messages(
 	CONSTRAINT fk_messages_chat FOREIGN KEY (chat_id) REFERENCES chats(id)
 )
 
+CREATE TABLE IF NOT EXISTS related_images(
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	image_id UUID NOT NULL,
+	message_id UUID NOT NULL,
+	similarity NUMERIC(5, 2) NOT NULL,
+	CONSTRAINT fk_relatedImages_message FOREIGN KEY (message_id) REFERENCES messages(id),
+	CONSTRAINT fk_relatedImages_image FOREIGN KEY (image_id) REFERENCES images(id)
+)
+
 
 Version: 0.2
 Añadida la tabla de chats, con sus respectivas claves foráneas a users e images. Además, se ha cambiado el tipo de id a UUID para ambas tablas, y se ha añadido la función gen_random_uuid() para generar automáticamente los UUIDs.
