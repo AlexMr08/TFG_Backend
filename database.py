@@ -21,8 +21,10 @@ def get_chroma_collection():
             _chroma_client = chromadb.PersistentClient(path=config.DB_PATH)
     return _chroma_client.get_collection("wikiart")
 
+
+
 DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
-engine = create_async_engine(DATABASE_URL, echo=True, future=True)
+engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
 
 async def init_db():
     async with engine.begin() as conn:
@@ -42,6 +44,7 @@ def get_db_connection():
         # Solo se inicializa si no existe
         _postgres_client = create_async_engine(DATABASE_URL, echo=True, future=True)
     return _postgres_client
+
 
 def view_database():
     collection = get_chroma_collection()

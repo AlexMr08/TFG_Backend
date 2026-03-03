@@ -1,3 +1,12 @@
+Version 0.4
+
+ALTER TABLE messages
+ADD COLUMN question_id UUID,
+ADD CONSTRAINT fk_messages_qid FOREIGN KEY (question_id) REFERENCES messages(id) ON DELETE CASCADE;
+
+ALTER TABLE messages
+ADD COLUMN status TEXT DEFAULT 'CREATED';
+
 Version: 0.3
 Añadidada a images una foreign key al usuario que la subió o en caso de ser del sistema, null
 

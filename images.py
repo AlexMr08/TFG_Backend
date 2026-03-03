@@ -17,7 +17,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from firebase_admin.auth import verify_id_token
-from sentence_transformers import SentenceTransformer
+from model_loader import embedder
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -86,8 +86,6 @@ def get_current_user_id(token: str = Depends(oauth2_scheme)):
 
 imagesRouter = APIRouter()
 collection = get_chroma_collection()
-embedder = SentenceTransformer('clip-ViT-L-14', device='cuda')
-embedder = embedder.half()
     
 @imagesRouter.post("/view")
 async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
@@ -228,3 +226,9 @@ async def get_image_thumbnail(image_path: str, size: int = 600):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar la imagen: {str(e)}")
     
+@imagesRouter.get("/imagen/{filename}")
+async def get_image(filename: str):
+    full_path = os.path.join(config.CARPETA_IMAGENES, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    return FileResponse(full_path, media_type="image/jpeg")
