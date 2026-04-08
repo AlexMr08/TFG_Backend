@@ -60,7 +60,7 @@ ID_TO_LABEL = {
   150: 'Fauvism', 151: 'High Renaissance', 152: 'Impressionism', 153: 'Mannerism Late Renaissance', 154: 'Minimalism', 
   155: 'Naive Art Primitivism', 156: 'New Realism', 157: 'Northern Renaissance', 158: 'Pointillism', 159: 'Pop Art', 
   160: 'Post Impressionism', 161: 'Realism', 162: 'Rococo', 163: 'Romanticism', 164: 'Symbolism', 
-  165: 'Synthetic Cubism', 166: 'Ukiyo e'
+  165: 'Synthetic Cubism', 166: 'Ukiyo e', 167: 'Unknown Style'
 }
 
 def create_access_token(user_id: str):

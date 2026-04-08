@@ -1,78 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile
-from fastapi import Response, UploadFile, Form, HTTPException
+from fastapi import APIRouter, Depends, Response, Form, HTTPException
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
-from pydantic import BaseModel
 from PIL import Image
 import io
 import os
 import config
-import regex
-
+import uuid
+from uuid import UUID
 from database import get_chroma_collection
 from PaginacionRequest import PaginacionRequest
 from chromadb.api import Collection
-
-from typing import Annotated
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
-from firebase_admin.auth import verify_id_token
+from fastapi import Depends
+from fastapi.security import HTTPBearer, OAuth2PasswordBearer
 from model_loader import embedder
-
-bearer_scheme = HTTPBearer(auto_error=False)
-
-from firebase_admin import auth
-from fastapi import HTTPException, status, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
+from clases.ImageModel import ImageModel, ArtistModel
+from fastapi import HTTPException, Depends
 from database import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-def get_firebase_user_from_token(
-    token: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> dict | None:
-    try:
-        if not token:
-            raise ValueError("No token provided")
-        
-        # verify_id_token comprueba firma, expiración y formato
-        # check_revoked=True es opcional, verifica si el usuario cambió la contraseña recientemente
-        user = auth.verify_id_token(token.credentials, check_revoked=False, clock_skew_seconds=10)
-        return user
-
-    except auth.ExpiredIdTokenError:
-        print("DEBUG: El token ha caducado (duración máx 1 hora).")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    except auth.RevokedIdTokenError:
-        print("DEBUG: El token ha sido revocado (usuario cambió contraseña o deshabilitado).")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token revoked",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    except auth.InvalidIdTokenError as e:
-        # AQUÍ es donde verás si es un problema de "Issued in the future"
-        print(f"DEBUG: Token inválido - Detalle real: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}", # Devuelve el error al front para testear
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    except Exception as e:
-        print(f"DEBUG: Error inesperado validando token: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+bearer_scheme = HTTPBearer(auto_error=False)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
@@ -86,28 +33,212 @@ def get_current_user_id(token: str = Depends(oauth2_scheme)):
 
 imagesRouter = APIRouter()
 collection = get_chroma_collection()
-    
+
+@imagesRouter.get("/search")
+async def search_art(
+    query: str,
+    artists_limit: int = 5,
+    artworks_limit: int = 5,
+    session: AsyncSession = Depends(get_session),
+    collection: Collection = Depends(get_chroma_collection),
+):
+    """
+    Busca artistas y obras de arte por texto.
+    """
+    print(f"Buscando arte con query: {query}")
+    clean_query = query.strip()
+    if not clean_query:
+        return {"artists": [], "artworks": [], "total_artists": 0, "total_artworks": 0}
+
+    artists_limit = max(1, min(artists_limit, 100))
+    artworks_limit = max(1, min(artworks_limit, 100))
+    search_value = f"%{clean_query}%"
+    search_prefix_value = f"{clean_query}%"
+
+    query_artists = text(
+        """
+        SELECT id, name, image
+        FROM artists
+        WHERE name ILIKE :query
+        ORDER BY (name ILIKE :prefix) DESC, name
+        LIMIT :limit
+        """
+    )
+
+    query_artworks = text(
+        """
+        SELECT
+            i.id,
+            i.name,
+            i.local_route,
+            i.year,
+            i.artist_id,
+            i.style_id,
+            i.genre_id,
+            a.name AS artist,
+            s.name AS style,
+            g.name AS genre
+        FROM images AS i
+        LEFT JOIN artists AS a ON i.artist_id = a.id
+        LEFT JOIN styles AS s ON i.style_id = s.id
+        LEFT JOIN genres AS g ON i.genre_id = g.id
+        WHERE i.owner_id IS NULL
+          AND (
+            i.name ILIKE :query
+            OR a.name ILIKE :query
+            OR s.name ILIKE :query
+            OR g.name ILIKE :query
+            OR CAST(i.year AS TEXT) ILIKE :query
+          )
+                ORDER BY
+                        (i.name ILIKE :prefix) DESC,
+                        i.name,
+                        (a.name ILIKE :prefix) DESC,
+                        (s.name ILIKE :prefix) DESC,
+                        (g.name ILIKE :prefix) DESC
+        LIMIT :limit
+        """
+    )
+
+    artists_result = await session.execute(
+        query_artists,
+        {"query": search_value, "prefix": search_prefix_value, "limit": artists_limit},
+    )
+    artworks_result = await session.execute(
+        query_artworks,
+        {"query": search_value, "prefix": search_prefix_value, "limit": artworks_limit},
+    )
+
+    artists_rows = artists_result.mappings().all()
+    artworks_rows = artworks_result.mappings().all()
+
+    artists = []
+    for row in artists_rows:
+        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artists.append(artista)
+
+    artworks = []
+    for row in artworks_rows:
+        relative_path = row["local_route"]
+        artworks.append(ImageModel(
+            id=str(row["id"]),
+            name=row["name"],
+            artist=row["artist"],
+            style=row["style"],
+            genre=row["genre"],
+            image_url=f"/art/{relative_path}",
+            year=row["year"],
+            artist_id=str(row["artist_id"]) if row["artist_id"] else None,
+            style_id=str(row["style_id"]) if row["style_id"] else None,
+            genre_id=str(row["genre_id"]) if row["genre_id"] else None,
+        ))
+
+    print(f"Artistas encontrados: {len(artists)}")
+    print(f"Obras encontradas: {len(artworks)}")
+    return {
+        "artists": artists,
+        "art": artworks,
+        "total_artists": len(artists),
+        "total_artworks": len(artworks),
+    }
+
 @imagesRouter.post("/view")
 async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
     """
     Devuelve los elementos paginados.
     """
 
-    offset = (datos.page) * datos.items_per_page
+    page = max(1, datos.page)
     limit = datos.items_per_page
+    offset = (page - 1) * limit
+    filtros = datos.filtros or {}
     
-    print(f"Pidiendo página {datos.page} con {datos.items_per_page} elementos.")
+    print(f"Pidiendo página {page} con {datos.items_per_page} elementos.")
     print(f"Consulta DB: LIMIT {limit} OFFSET {offset}")
+    print(f"Filtros recibidos: {filtros}")
     
     art = []
     id = offset
-    #Obtenemos solo las imagenes sin propietario (owner_id IS NULL) para mostrar en la galería pública, ordenadas por nombre
-    query = text("""SELECT * FROM images WHERE owner_id IS NULL ORDER BY name LIMIT :limit OFFSET :offset""")
-    result = await session.execute(query, {"limit": limit, "offset": offset})
+    # Obtenemos solo imágenes públicas y aplicamos filtros opcionales.
+    from_sql = """
+        FROM images AS i
+        LEFT JOIN artists AS a ON i.artist_id = a.id
+        LEFT JOIN styles AS s ON i.style_id = s.id
+        LEFT JOIN genres AS g ON i.genre_id = g.id
+    """
+    where_clauses = ["i.owner_id IS NULL"]
+    params = {"limit": limit, "offset": offset}
+
+    if filtros.get("artist_id"):
+        where_clauses.append("i.artist_id = :artist_id")
+        params["artist_id"] = str(filtros["artist_id"])
+
+    if filtros.get("style_id"):
+        where_clauses.append("i.style_id = :style_id")
+        params["style_id"] = str(filtros["style_id"])
+
+    if filtros.get("genre_id"):
+        where_clauses.append("i.genre_id = :genre_id")
+        params["genre_id"] = str(filtros["genre_id"])
+
+    if filtros.get("artist"):
+        where_clauses.append("a.name ILIKE :artist")
+        params["artist"] = f"%{filtros['artist'].strip()}%"
+
+    if filtros.get("style"):
+        where_clauses.append("s.name ILIKE :style")
+        params["style"] = f"%{filtros['style'].strip()}%"
+
+    if filtros.get("genre"):
+        where_clauses.append("g.name ILIKE :genre")
+        params["genre"] = f"%{filtros['genre'].strip()}%"
+
+    if filtros.get("name"):
+        where_clauses.append("i.name ILIKE :name")
+        params["name"] = f"%{filtros['name'].strip()}%"
+
+    if filtros.get("year") is not None:
+        where_clauses.append("i.year = :year")
+        params["year"] = int(filtros["year"])
+
+    if filtros.get("year_from") is not None:
+        where_clauses.append("i.year >= :year_from")
+        params["year_from"] = int(filtros["year_from"])
+
+    if filtros.get("year_to") is not None:
+        where_clauses.append("i.year <= :year_to")
+        params["year_to"] = int(filtros["year_to"])
+
+    where_sql = " AND ".join(where_clauses)
+
+    query = text(f"""
+        SELECT
+            i.id AS id,
+            i.local_route AS local_route,
+            i.name AS name,
+            i.artist_id AS artist_id,
+            i.style_id AS style_id,
+            i.genre_id AS genre_id,
+            i.owner_id AS owner_id,
+            i.year AS year,
+            a.name AS artist,
+            s.name AS style,
+            g.name AS genre
+        {from_sql}
+        WHERE {where_sql}
+        ORDER BY i.name
+        LIMIT :limit OFFSET :offset
+    """)
+    result = await session.execute(query, params)
     rows = result.mappings().all()
 
-    count_query = text("SELECT COUNT(*) FROM images WHERE owner_id IS NULL")
-    total_result = await session.execute(count_query)
+    count_query = text(f"""
+        SELECT COUNT(*)
+        {from_sql}
+        WHERE {where_sql}
+    """)
+    count_params = {k: v for k, v in params.items() if k not in {"limit", "offset"}}
+    total_result = await session.execute(count_query, count_params)
     collection_size = total_result.scalar()
 
     for row in rows:
@@ -118,39 +249,44 @@ async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_cu
             print(f"Imagen {full_path} es mayor de 600KB, se recomienda usar miniatura.")
         
         image_url = f"/art/{relative_path}"
-        art.append({
-            "id": row['id'],
-            "name": row['name'],
-            "artist": row['artist'],
-            "style": row['style'],
-            "genre": row['genre'],
-            "image_url": image_url
-        })
+        art.append(
+            ImageModel(
+                id=str(row['id']),
+                artist_id=str(row['artist_id']) if row['artist_id'] else None,
+                style_id=str(row['style_id']) if row['style_id'] else None,
+                genre_id=str(row['genre_id']) if row['genre_id'] else None,
+                name=row['name'],
+                artist=row['artist'],
+                style=row['style'],
+                genre=row['genre'],
+                image_url=image_url,
+                year=row['year'],
+            )
+        )
     return {"art": art, "total_items": collection_size}
 
-@imagesRouter.get("/images/{image_id}")
-async def get_art_by_id(image_id: str, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+@imagesRouter.get("/images/{image_id:uuid}")
+async def get_art_by_id(image_id: UUID, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
     """
     Devuelve los detalles de una obra por su ID.
     """
-    query = text("SELECT * FROM images WHERE id = :id AND (owner_id IS NULL OR owner_id = :user_id)")
-    result = await session.execute(query, {"id": image_id, "user_id": user})
-    row = result.mappings().first()
+    image_found = await get_image_with_id(image_id, session, user)
     
-    if not row:
-        raise HTTPException(status_code=404, detail="Image not found")
+    image = ImageModel(
+        id=str(image_found.id),
+        name=image_found.name,
+        artist=image_found.artist,
+        style=image_found.style,
+        genre=image_found.genre,
+        image_url=image_found.image_url,
+        owner_id=str(image_found.owner_id) if image_found.owner_id else None,
+        artist_id=str(image_found.artist_id) if image_found.artist_id else None,
+        style_id=str(image_found.style_id) if image_found.style_id else None,
+        genre_id=str(image_found.genre_id) if image_found.genre_id else None,
+        year=image_found.year
+    )
     
-    relative_path = row['local_route']
-    image_url = f"/art/{relative_path}"
-    
-    return {
-        "id": row['id'],
-        "name": row['name'],
-        "artist": row['artist'],
-        "style": row['style'],
-        "genre": row['genre'],
-        "image_url": image_url
-    }
+    return image
 
 @imagesRouter.post("/find_art")
 async def find_art(query: str = Form(...), collection: Collection = Depends(get_chroma_collection)):
@@ -179,7 +315,8 @@ async def find_art(query: str = Form(...), collection: Collection = Depends(get_
     
     return {"art": art, "total_items": len(art)}
 
-@imagesRouter.get("/art/{image_path:path}")
+DeprecationWarning("El endpoint /find_art está en desuso. Se recomienda usar /search/art con parámetros de búsqueda más específicos.")
+@imagesRouter.get("/art/{image_path:path}", deprecated=True)
 async def get_image_static(image_path: str):
     """
     Devuelve la imagen original sin procesar.
@@ -213,16 +350,26 @@ async def get_image_thumbnail(image_path: str, size: int = 600):
     # Verificar que el archivo existe
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail=f"Imagen no encontrada: {image_path}")
+    if size <= 0:
+        raise HTTPException(status_code=400, detail="El parametro 'size' debe ser mayor que 0")
     
     try:
-        image = Image.open(full_path)
-        size_ori = os.path.getsize(full_path)
-        if size_ori > 200*1024:
-            image.thumbnail((size, size), Image.LANCZOS)
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG', quality=85)
-        img_byte_arr = img_byte_arr.getvalue()
-        return Response(content=img_byte_arr, media_type="image/jpeg")
+        with Image.open(full_path) as image:
+            image.load()
+
+            # JPEG no admite alpha/paleta: convertir para evitar errores 500 al guardar.
+            if image.mode not in ("RGB", "L"):
+                image = image.convert("RGB")
+            elif image.mode == "L":
+                image = image.convert("RGB")
+
+            size_ori = os.path.getsize(full_path)
+            if size_ori > 200*1024:
+                image.thumbnail((size, size), Image.LANCZOS)
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG', quality=85)
+            img_byte_arr = img_byte_arr.getvalue()
+            return Response(content=img_byte_arr, media_type="image/jpeg")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar la imagen: {str(e)}")
     
@@ -232,3 +379,96 @@ async def get_image(filename: str):
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="Imagen no encontrada")
     return FileResponse(full_path, media_type="image/jpeg")
+
+@imagesRouter.get("/artists")
+async def get_artists(user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+    artists = []
+    stmnt = text("SELECT * FROM artists")
+    result = await session.execute(stmnt)
+    rows = result.mappings().all()
+    for row in rows:
+        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artists.append(artista)
+    return {"artists": artists}
+
+async def get_image_with_id(image_id, session, user=None) -> ImageModel:
+    query_img = text("""SELECT i.id, i.local_route, i.owner_id, i.artist_id, 
+                     i.style_id, i.genre_id, i.name, i.year, 
+                     a.name AS artist, s.name AS style, g.name AS genre 
+                     FROM images AS i
+                     LEFT JOIN artists a ON i.artist_id = a.id 
+                     LEFT JOIN styles s ON i.style_id = s.id 
+                     LEFT JOIN genres g ON i.genre_id = g.id 
+                     WHERE i.id = :id and (i.owner_id = :user_id OR i.owner_id IS NULL)""")
+    result_img = await session.execute(query_img, {"id": image_id, "user_id": user})
+    image_db = result_img.mappings().one_or_none()
+    print(f"Resultado de la consulta de imagen con ID {image_id}: {image_db}")
+    if not image_db:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+
+    image_model = ImageModel(
+        id = str(image_db['id']),
+        owner_id = str(image_db['owner_id']),
+        artist_id=str(image_db['artist_id']),
+        style_id=str(image_db['style_id']),
+        genre_id=str(image_db['genre_id']),
+        name = image_db['name'],
+        artist = image_db['artist'],
+        style = image_db['style'],
+        genre = image_db['genre'],
+        year = image_db['year'],
+        image_url = image_db['local_route']
+    )
+    print("\n--------------------\n")
+    print(f"Imagen modelada con ID {image_id}: {image_model}")
+    print("\n--------------------\n")
+
+    return image_model
+
+async def save_image_and_get_data(contents, user, commit, session) -> ImageModel:
+    #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
+    new_id = str(uuid.uuid4())
+    with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
+        img_file.write(contents)
+    local_route = f"User/{new_id}.jpg"
+    
+    query_artist = text("SELECT id FROM artists WHERE name = :name")
+    artist_res = await session.execute(query_artist, {"name": "Unknown Artist"})
+    artist_id = artist_res.scalar_one_or_none()
+    
+    query_genre = text("SELECT id FROM genres WHERE name = :name")
+    genre_res = await session.execute(query_genre, {"name": "Unknown Genre"})
+    genre_id = genre_res.scalar_one_or_none()
+
+    query_style = text("SELECT id FROM styles WHERE name = :name")
+    style_res = await session.execute(query_style, {"name": "Unknown Style"})
+    style_id = style_res.scalar_one_or_none()
+    if not style_id:
+        style_id = str(uuid.uuid4())
+        query_insert_style = text("INSERT INTO styles (id, name) VALUES (:id, :name)")
+        await session.execute(query_insert_style, {"id": style_id, "name": "Unknown Style"})
+
+    query = text("""INSERT INTO images (id, local_route, owner_id, artist_id, style_id, genre_id) 
+                VALUES (:id, :local_route, :owner_id, :artist_id, :style_id, :genre_id) RETURNING id""")
+    result = await session.execute(query, {
+        "id": new_id,
+        "local_route": local_route,
+        "owner_id": user,
+        "artist_id": artist_id,
+        "style_id": style_id,
+        "genre_id": genre_id
+    })
+    if commit:
+        await session.commit()
+    return ImageModel(
+        id = new_id,
+        artist_id=str(artist_id),
+        style_id=str(style_id),
+        genre_id=str(genre_id),
+        name="Unknown",
+        year="Unknown",
+        owner_id = user,
+        image_url = local_route
+    )
+
+

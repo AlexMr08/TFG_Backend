@@ -10,6 +10,58 @@ import config
 import torch
 import psycopg2
 
+def get_or_create_artist(cur, artist_name: str):
+    sql = """
+    INSERT INTO artists (name)
+    VALUES (%s)
+    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+    RETURNING id;
+    """
+    cur.execute(sql, (artist_name,))
+    return cur.fetchone()[0]
+
+def get_or_create_genre(cur, genre_name: str):
+    sql = """
+    INSERT INTO genres (name)
+    VALUES (%s)
+    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+    RETURNING id;
+    """
+    cur.execute(sql, (genre_name,))
+    return cur.fetchone()[0]
+
+def get_or_create_style(cur, style_name: str):
+    sql = """
+    INSERT INTO styles (name)
+    VALUES (%s)
+    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+    RETURNING id;
+
+    """
+    cur.execute(sql, (style_name,))
+    return cur.fetchone()[0]
+
+def insert_image_postgresV2(conn, relative_path, name, artist_name, style, genre, year):
+    with conn.cursor() as cur:
+        artist_id = get_or_create_artist(cur, artist_name)
+        genre_id = get_or_create_genre(cur, genre)
+        style_id = get_or_create_style(cur, style)
+        sql = """
+        INSERT INTO images (local_route, name, artist_id, style_id, genre_id, year)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (local_route) DO NOTHING
+        RETURNING id;
+        """
+        cur.execute(sql, (relative_path, name, artist_id, style_id, genre_id, year))
+        inserted_row = cur.fetchone()
+        return inserted_row[0] if inserted_row else None
+
+def get_image_id_by_local_route(conn, relative_path):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM images WHERE local_route = %s", (relative_path,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
 def insert_image_postgres(ruta_relativa, name, artist, style, genre, year):
     sql = """ INSERT INTO images (local_route, name, artist, style, genre, year)
         VALUES (%s, %s, %s, %s, %s, %s)
@@ -74,7 +126,7 @@ collection = chroma_client.get_or_create_collection(name="wikiart")
 
 print(">>> Leyendo CSV...")
 df = pd.read_csv(config.CSV_PATH)
-df = df.head(40)
+df = df.head(500)
 df['artist_name'] = df['artist'].map(config.ID_TO_LABEL).fillna('Unknown')
 df['style_name'] = df['style'].map(config.ID_TO_LABEL).fillna('Unknown')
 df['genre_name'] = df['genre'].map(config.ID_TO_LABEL).fillna('Unknown')
@@ -82,57 +134,91 @@ df['genre_name'] = df['genre'].map(config.ID_TO_LABEL).fillna('Unknown')
 # --- PROCESO ---
 BATCH_SIZE = 64  # Aumentado más para RTX 5070 Ti
 batch_ids, batch_images, batch_metadatas = [], [], []
-
 print(">>> Iniciando Ingesta...")
-for index, row in tqdm(df.iterrows(), total=df.shape[0]):
-    try:
-        ruta_relativa = row['file'] # Ej: "Realism/vangogh_01.jpg"
-        ruta_completa = os.path.join(config.CARPETA_IMAGENES, ruta_relativa)
-        
-        if not os.path.exists(ruta_completa): continue
 
-        nombre = ruta_relativa.split('_')[-1][:-4].replace("","").title().replace('-', ' ').replace(" S ", "'s ").strip()
-        year = nombre.split()[-1] if nombre.split()[-1].isdigit() and len(nombre.split()[-1]) == 4 else 'Unknown'
-        if (year != 'Unknown'):
-            nombre = nombre.replace(year, '').strip()
+conexion = psycopg2.connect(
+    dbname="tfg",
+    user="postgres",
+    password="3201Alex",
+    host="localhost",
+    port="5432"
+)
+pending_db_writes = 0
+duplicates_skipped = 0
+try:
+    for index, row in tqdm(df.iterrows(), total=df.shape[0]):
+        try:
+            ruta_relativa = row['file'] # Ej: "Realism/vangogh_01.jpg"
+            ruta_completa = os.path.join(config.CARPETA_IMAGENES, ruta_relativa)
 
-        image_id = insert_image_postgres(
-            ruta_relativa,
-            nombre,
-            row['artist_name'],
-            row['style_name'],
-            row['genre_name'],
-            year,
-        )
+            if not os.path.exists(ruta_completa):
+                continue
 
-        # Imagen
-        image = Image.open(ruta_completa)
-        if image.mode != 'RGB': image = image.convert('RGB')
-        
-        batch_images.append(image)
-        batch_ids.append(str(image_id))
-    
-        batch_metadatas.append({
-            "id": image_id,
-            "artist": row['artist_name'],
-            "style": row['style_name'],
-            "genre": row['genre_name'],
-            "filepath": ruta_relativa,
-        })
+            nombre = ruta_relativa.split('_')[-1][:-4].replace("","").title().replace('-', ' ').replace(" S ", "'s ").strip()
+            year = nombre.split()[-1] if nombre.split()[-1].isdigit() and len(nombre.split()[-1]) == 4 else 'Unknown'
+            if year != 'Unknown':
+                nombre = nombre.replace(year, '').strip()
 
-        if len(batch_images) >= BATCH_SIZE:
-            embeddings = embedder.encode(
-                batch_images, 
-                batch_size=BATCH_SIZE,
-                show_progress_bar=False, 
-                normalize_embeddings=True,
-                convert_to_tensor=False
-            ).tolist()
-            collection.upsert(ids=batch_ids, embeddings=embeddings, metadatas=batch_metadatas)
-            batch_images, batch_ids, batch_metadatas = [], [], []
+            image_id = insert_image_postgresV2(
+                conn=conexion,
+                relative_path=ruta_relativa,
+                name=nombre,
+                artist_name=row['artist_name'],
+                style=row['style_name'],
+                genre=row['genre_name'],
+                year=year,
+            )
 
-    except Exception as e:
-        print(f"Error {index}: {e}")
+            if image_id is None:
+                duplicates_skipped += 1
+                image_id = get_image_id_by_local_route(conexion, ruta_relativa)
+                if image_id is None:
+                    print(f"No se pudo recuperar el ID existente para '{ruta_relativa}'. Se omite esta imagen.")
+                    continue
+                print(f"Image '{nombre}' from '{row['artist_name']}' already exists in PostgreSQL. Reusing ID {image_id} for ChromaDB. Total duplicates: {duplicates_skipped}")
+
+            pending_db_writes += 1
+
+            # Imagen
+            image = Image.open(ruta_completa)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+
+            batch_images.append(image)
+            batch_ids.append(str(image_id))
+
+            batch_metadatas.append({
+                "id": image_id,
+                "artist": row['artist_name'],
+                "style": row['style_name'],
+                "genre": row['genre_name'],
+                "filepath": ruta_relativa,
+            })
+
+            if len(batch_images) >= BATCH_SIZE:
+                embeddings = embedder.encode(
+                    batch_images,
+                    batch_size=BATCH_SIZE,
+                    show_progress_bar=False,
+                    normalize_embeddings=True,
+                    convert_to_tensor=False
+                ).tolist()
+                collection.upsert(ids=batch_ids, embeddings=embeddings, metadatas=batch_metadatas)
+
+                # Commit por lote para reducir overhead y mantener consistencia.
+                conexion.commit()
+                pending_db_writes = 0
+                batch_images, batch_ids, batch_metadatas = [], [], []
+
+        except Exception as e:
+            # Deja la conexión limpia para continuar con la siguiente fila.
+            conexion.rollback()
+            pending_db_writes = 0
+            print(f"Error {index}: {e}")
+finally:
+    if pending_db_writes > 0:
+        conexion.commit()
+    conexion.close()
 
 if batch_images:
     embeddings = embedder.encode(

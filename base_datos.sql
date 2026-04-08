@@ -1,5 +1,44 @@
 Version 0.4
 
+ALTER TABLE images
+ADD CONSTRAINT uq_images_local_route UNIQUE (local_route);
+
+ALTER TABLE images
+ADD COLUMN IF NOT EXISTS artist_id UUID,
+ADD CONSTRAINT fk_images_artist
+FOREIGN KEY (artist_id) REFERENCES artists(id);
+
+ALTER TABLE images
+ADD COLUMN IF NOT EXISTS genre_id UUID,
+ADD CONSTRAINT fk_images_genre
+FOREIGN KEY (genre_id) REFERENCES genres(id);
+
+ALTER TABLE images
+ADD COLUMN IF NOT EXISTS style_id UUID,
+ADD CONSTRAINT fk_images_style
+FOREIGN KEY (style_id) REFERENCES styles(id);
+
+CREATE TABLE IF NOT EXISTS artists (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_artists_name UNIQUE (name)
+);
+
+CREATE TABLE IF NOT EXISTS genres (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_genres_name UNIQUE (name)
+);
+
+CREATE TABLE IF NOT EXISTS styles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_styles_name UNIQUE (name)
+);
+
 ALTER TABLE messages
 ADD COLUMN question_id UUID,
 ADD CONSTRAINT fk_messages_qid FOREIGN KEY (question_id) REFERENCES messages(id) ON DELETE CASCADE;
@@ -36,7 +75,7 @@ CREATE TABLE IF NOT EXISTS chats(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID,
     topic TEXT,
-    image_id UUID,
+    image_id UUID NOT NULL,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 	CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id),
 	CONSTRAINT fk_image FOREIGN KEY (image_id) REFERENCES images(id)
@@ -49,7 +88,7 @@ UNIQUE (user_id, image_id);
 
 CREATE TABLE IF NOT EXISTS messages(
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-	chat_id UUID,
+	chat_id UUID NOT NULL,
 	response BOOL DEFAULT false,
 	content TEXT,
 	created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

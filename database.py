@@ -31,6 +31,10 @@ async def init_db():
         # Aquí crea todas las tablas heredadas de SQLModel
         await conn.run_sync(SQLModel.metadata.create_all)
 
+AsyncSessionLocal = sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
+)
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async_session = sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False
