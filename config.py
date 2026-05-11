@@ -1,7 +1,7 @@
 import os
 import jwt
 from openai import OpenAI
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- RUTAS ---
 # Asegúrate de que esta carpeta apunta a donde descomprimiste el dataset
@@ -12,7 +12,7 @@ DB_PATH = "./arte_db"
 
 SECRET_KEY = "lleva_la_tarara_un_vestido_blanco"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60*24  # 1 minuto 
+ACCESS_TOKEN_EXPIRE_SECONDS = 86400  # 1 day
 
 # --- CLIENTE VLLM ---
 
@@ -64,11 +64,14 @@ ID_TO_LABEL = {
 }
 
 def create_access_token(user_id: str):
-    expire = datetime.now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(seconds=ACCESS_TOKEN_EXPIRE_SECONDS)
 
     payload = {
         "sub": user_id,       # ID interno (UUID)
-        "exp": expire
+        "exp": expire,
+        "iat": now,          # Issued At
     }
-
+    # Debug: show the exact expiration used to sign this token
+    print("DEBUG create_access_token exp:", int(expire.timestamp()), " iat: ", int(now.timestamp()))
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)

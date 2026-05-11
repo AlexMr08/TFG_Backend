@@ -7,7 +7,6 @@ import config
 from sqlmodel import SQLModel
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from models import Image  # Importar modelos para que SQLModel los reconozca
 
 _chroma_client = None
 _postgres_client = None
@@ -16,14 +15,13 @@ _postgres_client = None
 def get_chroma_collection():
     global _chroma_client
     if _chroma_client is None:
-        if _chroma_client is None:
         # Solo se inicializa si no existe
-            _chroma_client = chromadb.PersistentClient(path=config.DB_PATH)
-    return _chroma_client.get_collection("wikiart")
+        _chroma_client = chromadb.PersistentClient(path=config.DB_PATH)
+    return _chroma_client.get_or_create_collection("wikiart")
 
 
-
-DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
+DATABASE_URL_ORI = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
+DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5435/tfg"
 engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
 
 async def init_db():

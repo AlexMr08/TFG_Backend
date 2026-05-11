@@ -23,7 +23,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 def get_current_user_id(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=[config.ALGORITHM])
-        print("DEBUG: Payload decodificado del token:", payload)
+        now = int(datetime.now().timestamp())
+        print("DEBUG now/exp delta:", now, payload.get("exp"), payload.get("exp") - now)
         return payload["sub"]
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -126,10 +127,21 @@ async def get_chat_messages(
         
         # Obtener imágenes relacionadas con este mensaje
         query_related = text("""
-            SELECT ri.id as relation_id, ri.similarity, 
-                   i.id, i.local_route, i.name, i.artist, i.style, i.genre, i.year
+            SELECT
+                ri.id as relation_id,
+                ri.similarity,
+                i.id,
+                i.local_route,
+                i.name,
+                i.year,
+                a.name AS artist,
+                s.name AS style,
+                g.name AS genre
             FROM related_images ri
             JOIN images i ON ri.image_id = i.id
+            LEFT JOIN artists AS a ON i.artist_id = a.id
+            LEFT JOIN styles AS s ON i.style_id = s.id
+            LEFT JOIN genres AS g ON i.genre_id = g.id
             WHERE ri.message_id = :message_id
             ORDER BY ri.similarity DESC
         """)

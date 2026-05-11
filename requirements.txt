@@ -1,8 +1,5 @@
-accelerate
 asyncpg
-bitsandbytes
 chromadb
-einops
 email-validator
 fastapi
 firebase-admin
@@ -17,7 +14,6 @@ PyJWT
 python-dotenv
 python-jose
 python-multipart
-requests
 scikit-image
 scikit-learn
 sentence-transformers
@@ -28,3 +24,5 @@ torch
 tqdm
 transformers
 uvicorn[standard]
+httpx
+pytest

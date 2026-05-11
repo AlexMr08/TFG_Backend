@@ -76,7 +76,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 def get_current_user_id(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=[config.ALGORITHM])
-        print("DEBUG: Payload decodificado del token:", payload)
+        now = int(datetime.now().timestamp())
+        print("DEBUG now/exp delta:", now, payload.get("exp"), payload.get("exp") - now)
         return payload["sub"]
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -97,7 +98,7 @@ app.include_router(chatRouter)
 client = config.client
 qwenModelOld = "Qwen/Qwen2-VL-7B-Instruct-AWQ"
 qwenModel = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-
+qwenModelAWQ = "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit"
 # --- CORS (Permitir que tu Frontend hable con esto) ---
 app.add_middleware(
     CORSMiddleware,
@@ -554,41 +555,13 @@ def get_firebase_user_from_token(
     except Exception:
         # we also set the header
         # see https://fastapi.tiangolo.com/tutorial/security/simple-oauth2/
+        print("Error verificando token de Firebase. Asegúrate de enviar un token válido en el formato 'Bearer <token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not logged in or Invalid credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-@app.post("/signup")
-async def signup_user(
-    firebase_user: Annotated[dict, Depends(get_firebase_user_from_token)], 
-    session: AsyncSession = Depends(get_session), 
-    user_data: SignupData = SignupData()
-):
-    """signs up a new firebase user"""
-    print(firebase_user)
-    print(f"Datos recibidos: {user_data}")
-    
-    # Usar datos del JSON si están disponibles, sino usar los de firebase
-    user = {
-        "uid": firebase_user["uid"],
-        "name": user_data.name or firebase_user.get("name", "Unknown"),
-        "email": user_data.email or firebase_user.get("email", "Unknown"),
-        }
-    
-    insert_sql = text("""
-        INSERT INTO users (firebase_uid, name, email)
-        VALUES (:uid, :name, :email)
-        ON CONFLICT (firebase_uid) DO NOTHING 
-        RETURNING id, name;
-    """)
-    result = await session.execute(insert_sql, user)
-    await session.commit()
-    internal_id = result.scalar_one()
-    print(f"Usuario Firebase creado: {user['name']}, UID: {firebase_user['uid']}, ID interno: {internal_id}")
-    return {"id": internal_id, "name": user["name"], "email": user["email"], "exist": True}
-
 @app.post("/login")
 async def get_userid(firebase_user: Annotated[dict, Depends(get_firebase_user_from_token)], session: AsyncSession = Depends(get_session)):
     """gets the firebase connected user"""
@@ -604,17 +577,16 @@ async def get_userid(firebase_user: Annotated[dict, Depends(get_firebase_user_fr
     usuario_db = result.mappings().one_or_none()
     internal_id = None
     name = None
-    token = "None"
-    exist = True
+    token = None
     if usuario_db:
         internal_id = usuario_db['id']
         name = usuario_db['name']
         token = config.create_access_token(str(internal_id))
         print(f"Usuario con ID interno: {internal_id} ha iniciado sesión.")
     else:
-        exist = False
         internal_id = -1
         print(f"Usuario con UID Firebase: {user['uid']} no encontrado en la base de datos.")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos. Por favor, regístrate primero.")
     return {"id": internal_id, "name": name, "email": user["email"], "token": token}
 
  #Version con verificacion de token de Google directamente, evitando crear usuario en Firebase hasta que se complete el signup
@@ -635,12 +607,11 @@ async def check_user(request: CheckLoginRequest, session: AsyncSession = Depends
         print(usuario_db)
         # Si existe, obtenemos su firebase_uid y creamos el custom token (No se si seria mejor enviar el usuario completo y ahorrar una llamada en el login)
         if usuario_db:
-            firebase_uid = usuario_db['firebase_uid']
             #creamos un user del tipo UserData y los datos recibidos de la base de datos
             user_data = UserData(
                 internal_id=str(usuario_db['id']), name=usuario_db['name'], email=usuario_db['email'], avatar=usuario_db['profile_icon'])
             print(f"Usuario encontrado: {user_data}")
-            token = config.create_access_token(user_data.internal_id)
+            token = config.create_access_token(user_data.internal_id) 
             return LoginResponse(id_token=token, status="login", user=user_data)
             #return {"id_token": custom_token.decode('utf-8'), "status": "login"}
         else:
@@ -680,6 +651,7 @@ async def check_email_exists(
 @app.post("/perfected-signup")
 async def signup_user_google(request: SignUpWithGoogleRequest, session: AsyncSession = Depends(get_session)):
     try:
+        custom_token = None
         print(f"Datos recibidos para signup: {request}")
         if (not request.google_token and request.password and request.email):
             user_record = auth.create_user(email=request.email, password=request.password, display_name=request.name, email_verified=True)
@@ -688,7 +660,7 @@ async def signup_user_google(request: SignUpWithGoogleRequest, session: AsyncSes
                 INSERT INTO users (firebase_uid, name, email)
                 VALUES (:uid, :name, :email)
                 ON CONFLICT (firebase_uid) DO NOTHING
-                RETURNING id, name;
+                RETURNING id, name, email;
             """)
             result = await session.execute(insert_sql, {
                 "uid": firebase_uid,
@@ -699,14 +671,13 @@ async def signup_user_google(request: SignUpWithGoogleRequest, session: AsyncSes
             internal_id = result.scalar_one()
             print(f"Usuario creado: {request.name}, UID: {firebase_uid}, ID interno: {internal_id}")
             custom_token = auth.create_custom_token(firebase_uid)
-            return {"id_token": custom_token.decode('utf-8'), "status": "login"}
         
         elif(request.google_token):
             id_info = id_token.verify_oauth2_token(request.google_token, requests.Request(), GOOGLE_CLIENT_ID, clock_skew_in_seconds=60)
             email = id_info.get('email')
             user_record = auth.create_user(email=email, display_name=request.name)
             firebase_uid = user_record.uid
-            insert_sql = text("INSERT INTO users (firebase_uid, name, email) VALUES (:uid, :name, :email) ON CONFLICT (firebase_uid) DO NOTHING RETURNING id, name;")
+            insert_sql = text("INSERT INTO users (firebase_uid, name, email) VALUES (:uid, :name, :email) ON CONFLICT (firebase_uid) DO NOTHING RETURNING id, name, email;")
             result = await session.execute(insert_sql, {
                 "uid": firebase_uid,
                 "name": request.name,
@@ -716,7 +687,7 @@ async def signup_user_google(request: SignUpWithGoogleRequest, session: AsyncSes
             internal_id = result.scalar_one()
             print(f"Usuario creado: {request.name}, UID: {firebase_uid}, ID interno: {internal_id}")
             custom_token = auth.create_custom_token(firebase_uid)
-            return {"id_token": custom_token.decode('utf-8'), "status": "login"}
+        return {"id_token": custom_token.decode('utf-8'), "status": "login"}
         
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")

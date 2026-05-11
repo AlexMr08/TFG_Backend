@@ -18,6 +18,7 @@ from fastapi import HTTPException, Depends
 from database import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from typing import Optional
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -39,8 +40,7 @@ async def search_art(
     query: str,
     artists_limit: int = 5,
     artworks_limit: int = 5,
-    session: AsyncSession = Depends(get_session),
-    collection: Collection = Depends(get_chroma_collection),
+    session: AsyncSession = Depends(get_session)
 ):
     """
     Busca artistas y obras de arte por texto.
@@ -142,20 +142,27 @@ async def search_art(
         "total_artworks": len(artworks),
     }
 
-@imagesRouter.post("/view")
-async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+@imagesRouter.get("/view")
+async def get_art_paginated(
+    page: int = 1,
+    items_per_page: int = 20,
+    artist_id: Optional[str] = None,
+    style_id: Optional[str] = None,
+    genre_id: Optional[str] = None,
+    user: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+):
     """
     Devuelve los elementos paginados.
     """
 
-    page = max(1, datos.page)
-    limit = datos.items_per_page
+    page = max(1, page)
+    limit = max(1, min(items_per_page, 100))
     offset = (page - 1) * limit
-    filtros = datos.filtros or {}
     
-    print(f"Pidiendo página {page} con {datos.items_per_page} elementos.")
+    print(f"Pidiendo página {page} con {limit} elementos.")
     print(f"Consulta DB: LIMIT {limit} OFFSET {offset}")
-    print(f"Filtros recibidos: {filtros}")
+    print(f"Filtros recibidos: artist_id={artist_id}, style_id={style_id}, genre_id={genre_id}")
     
     art = []
     id = offset
@@ -169,45 +176,17 @@ async def get_art_paginated(datos: PaginacionRequest, user: str = Depends(get_cu
     where_clauses = ["i.owner_id IS NULL"]
     params = {"limit": limit, "offset": offset}
 
-    if filtros.get("artist_id"):
+    if artist_id:
         where_clauses.append("i.artist_id = :artist_id")
-        params["artist_id"] = str(filtros["artist_id"])
+        params["artist_id"] = str(artist_id)
 
-    if filtros.get("style_id"):
+    if style_id:
         where_clauses.append("i.style_id = :style_id")
-        params["style_id"] = str(filtros["style_id"])
+        params["style_id"] = str(style_id)
 
-    if filtros.get("genre_id"):
+    if genre_id:
         where_clauses.append("i.genre_id = :genre_id")
-        params["genre_id"] = str(filtros["genre_id"])
-
-    if filtros.get("artist"):
-        where_clauses.append("a.name ILIKE :artist")
-        params["artist"] = f"%{filtros['artist'].strip()}%"
-
-    if filtros.get("style"):
-        where_clauses.append("s.name ILIKE :style")
-        params["style"] = f"%{filtros['style'].strip()}%"
-
-    if filtros.get("genre"):
-        where_clauses.append("g.name ILIKE :genre")
-        params["genre"] = f"%{filtros['genre'].strip()}%"
-
-    if filtros.get("name"):
-        where_clauses.append("i.name ILIKE :name")
-        params["name"] = f"%{filtros['name'].strip()}%"
-
-    if filtros.get("year") is not None:
-        where_clauses.append("i.year = :year")
-        params["year"] = int(filtros["year"])
-
-    if filtros.get("year_from") is not None:
-        where_clauses.append("i.year >= :year_from")
-        params["year_from"] = int(filtros["year_from"])
-
-    if filtros.get("year_to") is not None:
-        where_clauses.append("i.year <= :year_to")
-        params["year_to"] = int(filtros["year_to"])
+        params["genre_id"] = str(genre_id)
 
     where_sql = " AND ".join(where_clauses)
 
@@ -381,10 +360,52 @@ async def get_image(filename: str):
     return FileResponse(full_path, media_type="image/jpeg")
 
 @imagesRouter.get("/artists")
-async def get_artists(user: str = Depends(get_current_user_id), session: AsyncSession = Depends(get_session)):
+async def get_artists(
+    page: int = 1,
+    items_per_page: int = 20,
+    user: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+):
     artists = []
-    stmnt = text("SELECT * FROM artists")
-    result = await session.execute(stmnt)
+    page = max(1, page)
+    items_per_page = max(1, min(items_per_page, 100))
+    offset = (page - 1) * items_per_page
+
+    stmnt = text("""
+        SELECT id, name, image
+        FROM artists
+        ORDER BY name
+        LIMIT :limit OFFSET :offset
+    """)
+    result = await session.execute(stmnt, {"limit": items_per_page, "offset": offset})
+    rows = result.mappings().all()
+    for row in rows:
+        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artists.append(artista)
+
+    count_stmt = text("SELECT COUNT(*) FROM artists")
+    count_result = await session.execute(count_stmt)
+    total_items = count_result.scalar() or 0
+
+    return {"artists": artists, "total_items": total_items}
+
+@imagesRouter.get("/recomendedArtists")
+async def get_recommended_artists(
+    limit: int = 6,
+    user: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+):
+    artists = []
+    limit = max(1, min(limit, 50))
+    stmnt = text("""
+        SELECT a.id, a.name, a.image, COUNT(i.id) AS artworks_count
+        FROM artists AS a
+        LEFT JOIN images AS i ON i.artist_id = a.id
+        GROUP BY a.id, a.name, a.image
+        ORDER BY artworks_count DESC, a.name
+        LIMIT :limit
+    """)
+    result = await session.execute(stmnt, {"limit": limit})
     rows = result.mappings().all()
     for row in rows:
         artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
