@@ -21,7 +21,8 @@ def get_chroma_collection():
 
 
 DATABASE_URL_ORI = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
-DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@db:5435/tfg"
+DATABASE_URL2 = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5435/tfg"
+DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@db:5432/tfg"
 engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
 
 async def init_db():
