@@ -620,7 +620,8 @@ async def check_user(request: CheckLoginRequest, session: AsyncSession = Depends
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error :(")
+        logger.error(f"Error en check-login: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/check-email")
 async def check_email_exists(
