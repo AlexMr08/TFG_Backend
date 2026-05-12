@@ -1,5 +1,4 @@
 import pandas as pd
-import chromadb
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 import os
@@ -9,6 +8,7 @@ from tqdm import tqdm
 import config
 import torch
 import psycopg2
+from database import get_chroma_collection, get_chroma_client, view_database
 
 def get_or_create_artist(cur, artist_name: str):
     sql = """
@@ -120,9 +120,10 @@ print(">>> Cargando CLIP en GPU con FP16...")
 embedder = SentenceTransformer('clip-ViT-L-14', device='cuda')
 embedder = embedder.half()  # FP16 para velocidad
 
-chroma_client = chromadb.PersistentClient(path=config.DB_PATH)
-chroma_client.delete_collection("wikiart") # Descomentar si quieres resetear
-collection = chroma_client.get_or_create_collection(name="wikiart")
+CHROMA_USE_HTTP = True
+chroma_client = get_chroma_client(use_http=CHROMA_USE_HTTP)
+chroma_client.delete_collection("wikiart")
+collection = get_chroma_collection("wikiart", use_http=CHROMA_USE_HTTP)
 
 print(">>> Leyendo CSV...")
 df = pd.read_csv(config.CSV_PATH)
@@ -229,3 +230,4 @@ if batch_images:
     collection.upsert(ids=batch_ids, embeddings=embeddings, metadatas=batch_metadatas)
 
 print(">>> Base de datos lista.")
+view_database(use_http=CHROMA_USE_HTTP)

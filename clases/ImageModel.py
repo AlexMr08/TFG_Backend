@@ -19,3 +19,5 @@ class ArtistModel(BaseModel):
     id: str
     name: Optional[str] = "Unknown"
     image_url: Optional[str] = None
+    genre: Optional[str] = None
+    style: Optional[str] = None

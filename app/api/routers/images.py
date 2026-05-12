@@ -8,7 +8,6 @@ import config
 import uuid
 from uuid import UUID
 from database import get_chroma_collection
-from PaginacionRequest import PaginacionRequest
 from chromadb.api import Collection
 from fastapi import Depends
 from fastapi.security import HTTPBearer, OAuth2PasswordBearer
@@ -34,6 +33,29 @@ def get_current_user_id(token: str = Depends(oauth2_scheme)):
 
 imagesRouter = APIRouter()
 collection = get_chroma_collection()
+
+
+def _artist_characteristics_sql(artist_alias: str) -> str:
+    return f"""
+        LEFT JOIN LATERAL (
+            SELECT g.name AS genre
+            FROM images AS i
+            INNER JOIN genres AS g ON i.genre_id = g.id
+            WHERE i.artist_id = {artist_alias}.id
+            GROUP BY g.name
+            ORDER BY COUNT(*) DESC, g.name
+            LIMIT 1
+        ) AS top_genre ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT s.name AS style
+            FROM images AS i
+            INNER JOIN styles AS s ON i.style_id = s.id
+            WHERE i.artist_id = {artist_alias}.id
+            GROUP BY s.name
+            ORDER BY COUNT(*) DESC, s.name
+            LIMIT 1
+        ) AS top_style ON TRUE
+    """
 
 @imagesRouter.get("/search")
 async def search_art(
@@ -372,19 +394,31 @@ async def get_artists(
     offset = (page - 1) * items_per_page
 
     stmnt = text("""
-        SELECT id, name, image
-        FROM artists
-        ORDER BY name
+        SELECT
+            a.id,
+            a.name,
+            a.image,
+            top_genre.genre,
+            top_style.style
+        FROM artists AS a
+        """ + _artist_characteristics_sql("a") + """
+        ORDER BY a.name
         LIMIT :limit OFFSET :offset
     """)
     result = await session.execute(stmnt, {"limit": items_per_page, "offset": offset})
     rows = result.mappings().all()
     for row in rows:
-        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artista = ArtistModel(
+            id=str(row['id']),
+            name=row['name'],
+            image_url=row['image'],
+            genre=row.get('genre'),
+            style=row.get('style'),
+        )
         artists.append(artista)
 
     count_stmt = text("SELECT COUNT(*) FROM artists")
-    count_result = await session.execute(count_stmt)
+    count_result = await session.execute(count_stmt, {})
     total_items = count_result.scalar() or 0
 
     return {"artists": artists, "total_items": total_items}
@@ -398,17 +432,29 @@ async def get_recommended_artists(
     artists = []
     limit = max(1, min(limit, 50))
     stmnt = text("""
-        SELECT a.id, a.name, a.image, COUNT(i.id) AS artworks_count
+        SELECT
+            a.id,
+            a.name,
+            a.image,
+            top_genre.genre,
+            top_style.style
         FROM artists AS a
         LEFT JOIN images AS i ON i.artist_id = a.id
-        GROUP BY a.id, a.name, a.image
-        ORDER BY artworks_count DESC, a.name
+        """ + _artist_characteristics_sql("a") + """
+        GROUP BY a.id, a.name, a.image, top_genre.genre, top_style.style
+        ORDER BY COUNT(i.id) DESC, a.name
         LIMIT :limit
     """)
     result = await session.execute(stmnt, {"limit": limit})
     rows = result.mappings().all()
     for row in rows:
-        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artista = ArtistModel(
+            id=str(row['id']),
+            name=row['name'],
+            image_url=row['image'],
+            genre=row.get('genre'),
+            style=row.get('style'),
+        )
         artists.append(artista)
     return {"artists": artists}
 
@@ -491,5 +537,3 @@ async def save_image_and_get_data(contents, user, commit, session) -> ImageModel
         owner_id = user,
         image_url = local_route
     )
-
-

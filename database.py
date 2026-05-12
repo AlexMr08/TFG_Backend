@@ -1,4 +1,5 @@
 from typing import AsyncGenerator
+import os
 import chromadb
 from chromadb.config import Settings
 import config
@@ -8,21 +9,69 @@ from sqlmodel import SQLModel
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-_chroma_client = None
+_chroma_client_local = None
+_chroma_client_http = None
 _postgres_client = None
 
-# Opcional: Obtener la colección aquí si siempre usas la misma
-def get_chroma_collection():
-    global _chroma_client
-    if _chroma_client is None:
-        # Solo se inicializa si no existe
-        _chroma_client = chromadb.PersistentClient(path=config.DB_PATH)
-    return _chroma_client.get_or_create_collection("wikiart")
+CHROMA_USE_HTTP = os.getenv("CHROMA_USE_HTTP", "false").strip().lower() in {"1", "true", "yes", "y"}
+CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8004"))
+CHROMA_SSL = os.getenv("CHROMA_SSL", "false").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def get_chroma_client_local(path: str | None = None):
+    """Cliente singleton de Chroma local (PersistentClient)."""
+    global _chroma_client_local
+    if _chroma_client_local is None:
+        _chroma_client_local = chromadb.PersistentClient(path=path or config.DB_PATH)
+    return _chroma_client_local
+
+
+def get_chroma_client_http(
+    host: str | None = None,
+    port: int | None = None,
+    ssl: bool | None = None,
+):
+    """Cliente singleton de Chroma remoto por HTTP (HttpClient)."""
+    global _chroma_client_http
+
+    resolved_host = host or CHROMA_HOST
+    resolved_port = port if port is not None else CHROMA_PORT
+    resolved_ssl = CHROMA_SSL if ssl is None else ssl
+
+    if _chroma_client_http is None:
+        _chroma_client_http = chromadb.HttpClient(
+            host=resolved_host,
+            port=resolved_port,
+            ssl=resolved_ssl,
+            settings=Settings(allow_reset=True),
+        )
+    return _chroma_client_http
+
+
+def get_chroma_client(use_http: bool | None = None):
+    """Devuelve el cliente Chroma activo según el modo configurado."""
+    resolved_use_http = CHROMA_USE_HTTP if use_http is None else use_http
+    return get_chroma_client_http() if resolved_use_http else get_chroma_client_local()
+
+
+def get_chroma_collection(collection_name: str = "wikiart", use_http: bool | None = None):
+    return get_chroma_client(use_http=use_http).get_or_create_collection(collection_name)
+
+
+def get_chroma_collection_http(
+    collection_name: str = "wikiart",
+    host: str | None = None,
+    port: int | None = None,
+    ssl: bool | None = None,
+):
+    """Devuelve una colección de ChromaDB usando cliente HTTP."""
+    return get_chroma_client_http(host=host, port=port, ssl=ssl).get_or_create_collection(collection_name)
 
 
 DATABASE_URL_ORI = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
-DATABASE_URL2 = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5435/tfg"
-DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@db:5432/tfg"
+DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5435/tfg"
+DATABASE_URL2 = "postgresql+asyncpg://postgres:3201Alex@db:5432/tfg"
 engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
 
 async def init_db():
@@ -49,8 +98,8 @@ def get_db_connection():
     return _postgres_client
 
 
-def view_database():
-    collection = get_chroma_collection()
+def view_database(use_http: bool = False):
+    collection = get_chroma_collection("wikiart", use_http=use_http)
     print(">>> Base de datos lista.")
 
     # --- INSPECCIÓN EN CONSOLA ---

@@ -14,7 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Annotated, Optional
 import os
 from model_loader import embedder
-from images import imagesRouter, get_image_with_id, save_image_and_get_data
+from app.api.routers.images import imagesRouter, get_image_with_id, save_image_and_get_data
 from database import AsyncSessionLocal, get_chroma_collection, view_database
 import firebase_admin
 import firebase_admin.auth as auth
@@ -40,8 +40,15 @@ from clases.ChatModel import ChatModel
 from clases.UserModel import UserData
 from clases.MessageInfo import MessageInfoV2
 from clases.CompleteChatResponse import CompleteChatResponse
-from chats import add_created_msg, add_received_msg, create_chat_with_image, get_chat_with_id, add_related_images_2_db, get_internal_chat_id
-from chats import chatRouter
+from app.api.routers.chats import (
+    add_created_msg,
+    add_received_msg,
+    create_chat_with_image,
+    get_chat_with_id,
+    add_related_images_2_db,
+    get_internal_chat_id,
+    chatRouter,
+)
 #from estrategia import Contexto, EstrategiaMensajeSimple, EstrategiaMensajeComplejo
 
 import asyncio
@@ -109,7 +116,7 @@ app.add_middleware(
 
 print("Iniciando API...")
 
-collection = get_chroma_collection()
+collection = get_chroma_collection(use_http=True)
 
 message_queues: dict[str, asyncio.Queue] = {}
 
@@ -609,7 +616,7 @@ async def check_user(request: CheckLoginRequest, session: AsyncSession = Depends
         if usuario_db:
             #creamos un user del tipo UserData y los datos recibidos de la base de datos
             user_data = UserData(
-                internal_id=str(usuario_db['id']), name=usuario_db['name'], email=usuario_db['email'], avatar=usuario_db['profile_icon'])
+                internal_id=str(usuario_db['id']), name=usuario_db['name'], email=usuario_db['email'])
             print(f"Usuario encontrado: {user_data}")
             token = config.create_access_token(user_data.internal_id) 
             return LoginResponse(id_token=token, status="login", user=user_data)

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- RUTAS ---
 # Asegúrate de que esta carpeta apunta a donde descomprimiste el dataset
-CARPETA_IMAGENES = "D:\wikiart" 
+CARPETA_IMAGENES = os.getenv("CARPETA_IMAGENES", "D:\\wikiart")
 CSV_PATH = "D:/wikiart/wclasses.csv"
 DB_PATH = "./arte_db"
 

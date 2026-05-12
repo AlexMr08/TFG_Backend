@@ -15,7 +15,7 @@ from database import get_session
 from clases.ImageModel import ImageModel
 from uuid import UUID
 from clases.ChatModel import ChatListResponse
-from images import get_image_with_id
+from app.api.routers.images import get_image_with_id
 
 chatRouter = APIRouter()
 
