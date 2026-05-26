@@ -9,8 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.api.routers.images import imagesRouter, get_current_user_id
-from database import get_session, get_chroma_collection
+from app.routers.images import imagesRouter
+from app.core.auth import get_current_user_id, create_access_token
+from app.db.database import get_session, get_chroma_collection
 
 
 class FakeResult:
@@ -72,8 +73,20 @@ async def test_search_empty_query_returns_empty_lists(test_app):
 @pytest.mark.asyncio
 async def test_search_returns_artists_and_artworks(test_app):
     artist_rows = [
-        {"id": "a1", "name": "Claude Monet", "image": "monet.jpg"},
-        {"id": "a2", "name": "Camille Pissarro", "image": None},
+        {
+            "id": "a1",
+            "name": "Claude Monet",
+            "image": "monet.jpg",
+            "genre": "Landscape",
+            "style": "Impressionism",
+        },
+        {
+            "id": "a2",
+            "name": "Camille Pissarro",
+            "image": None,
+            "genre": "Landscape",
+            "style": "Realism",
+        },
     ]
     artwork_rows = [
         {
@@ -111,7 +124,12 @@ async def test_search_returns_artists_and_artworks(test_app):
     assert payload["total_artworks"] == 1
     assert payload["artists"][0]["name"] == "Claude Monet"
     assert payload["artists"][0]["image_url"] == "monet.jpg"
+    assert payload["artists"][0]["genre"] == "Landscape"
+    assert payload["artists"][0]["style"] == "Impressionism"
     assert payload["art"][0]["image_url"] == "/art/monet/sunrise.jpg"
+
+    assert "top_genre" in fake_session.calls[0]["query"]
+    assert "top_style" in fake_session.calls[0]["query"]
 
     assert fake_session.calls[0]["params"]["limit"] == 2
     assert fake_session.calls[1]["params"]["limit"] == 1
@@ -215,9 +233,9 @@ async def test_view_returns_paginated_art_with_auth_override(test_app):
 
     transport = ASGITransport(app=test_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
+        response = await client.get(
             "/view",
-            json={"page": 1, "items_per_page": 1, "filtros": {}},
+            params={"page": 1, "items_per_page": 1, "filtros": {}},
         )
 
     assert response.status_code == 200
@@ -237,9 +255,18 @@ async def test_view_requires_auth(test_app):
 
     transport = ASGITransport(app=test_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
+        response = await client.get(
             "/view",
-            json={"page": 1, "items_per_page": 1, "filtros": {}},
+            params={"page": 1, "items_per_page": 1, "filtros": {}},
         )
 
     assert response.status_code == 401
+    
+@pytest.mark.anyio
+async def test_get_artists(test_app):
+    token = create_access_token("testuser")
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get("/artists", headers=headers)
+    assert response.status_code == 200

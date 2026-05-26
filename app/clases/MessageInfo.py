@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
-from clases.Enums import Estados, TipoMensaje
+from app.clases.Enums import Estados, TipoMensaje
 from typing import Optional
 
 class MessageInfoV2(BaseModel):

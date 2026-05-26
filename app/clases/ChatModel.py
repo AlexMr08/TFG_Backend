@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, model_validator, ConfigDict
 
-from clases.Enums import Estados
+from app.clases.Enums import Estados
 
 class ChatModel(BaseModel):
     id: str
@@ -32,5 +32,3 @@ class ChatModel(BaseModel):
         
         return self
     
-class ChatListResponse(BaseModel):
-    chats: list[ChatModel]

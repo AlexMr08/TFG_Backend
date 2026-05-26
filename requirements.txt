@@ -1,16 +1,14 @@
 asyncpg
 chromadb
-email-validator
 fastapi
 firebase-admin
 google-auth
-locust
+httpx
 numpy
 openai
 pandas
-Pillow
+pillow
 psycopg2-binary
-PyJWT
 python-dotenv
 python-jose
 python-multipart
@@ -24,5 +22,3 @@ torch
 tqdm
 transformers
 uvicorn[standard]
-httpx
-pytest

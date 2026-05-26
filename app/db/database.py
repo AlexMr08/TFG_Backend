@@ -2,7 +2,7 @@ from typing import AsyncGenerator
 import os
 import chromadb
 from chromadb.config import Settings
-import config
+from app.core import config
 
 
 from sqlmodel import SQLModel
@@ -13,10 +13,10 @@ _chroma_client_local = None
 _chroma_client_http = None
 _postgres_client = None
 
-CHROMA_USE_HTTP = os.getenv("CHROMA_USE_HTTP", "false").strip().lower() in {"1", "true", "yes", "y"}
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8004"))
-CHROMA_SSL = os.getenv("CHROMA_SSL", "false").strip().lower() in {"1", "true", "yes", "y"}
+CHROMA_USE_HTTP = config.CHROMA_USE_HTTP
+CHROMA_HOST = config.CHROMA_HOST
+CHROMA_PORT = config.CHROMA_PORT
+CHROMA_SSL = config.CHROMA_SSL
 
 
 def get_chroma_client_local(path: str | None = None):
@@ -55,8 +55,9 @@ def get_chroma_client(use_http: bool | None = None):
     return get_chroma_client_http() if resolved_use_http else get_chroma_client_local()
 
 
-def get_chroma_collection(collection_name: str = "wikiart", use_http: bool | None = None):
-    return get_chroma_client(use_http=use_http).get_or_create_collection(collection_name)
+def get_chroma_collection(collection_name: str | None = None, use_http: bool | None = None):
+    name = collection_name or config.CHROMA_COLLECTION
+    return get_chroma_client(use_http=use_http).get_or_create_collection(name)
 
 
 def get_chroma_collection_http(
@@ -69,9 +70,11 @@ def get_chroma_collection_http(
     return get_chroma_client_http(host=host, port=port, ssl=ssl).get_or_create_collection(collection_name)
 
 
-DATABASE_URL_ORI = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5432/tfg"
-DATABASE_URL = "postgresql+asyncpg://postgres:3201Alex@127.0.0.1:5435/tfg"
-DATABASE_URL2 = "postgresql+asyncpg://postgres:3201Alex@db:5432/tfg"
+DATABASE_URL_ORI = config.DATABASE_URL_ORI
+DATABASE_URL = config.DATABASE_URL
+DATABASE_URL2 = config.DATABASE_URL2
+
+# Engine created from centralized config DATABASE_URL
 engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
 
 async def init_db():
@@ -89,6 +92,7 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     )
     async with async_session() as session:
         yield session
+
 
 def get_db_connection():
     global _postgres_client

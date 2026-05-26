@@ -1,0 +1,10 @@
+pytest
+pytest-asyncio
+locust
+PyJWT
+email-validator
+httpx
+coverage
+flake8
+black
+isort

@@ -1,0 +1,138 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-windows
+    # En Windows con WSL2, esto suele bastar para mapear la GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8002:8000"
+    volumes:
+      - vllm_cache:/root/.cache/huggingface
+    command: >
+      Qwen/Qwen3-VL-8B-Instruct-FP8
+      --gpu-memory-utilization 0.85
+      --max-model-len 6144
+      --safetensors-load-strategy prefetch
+      --limit-mm-per-prompt.video=0
+      --limit-mm-per-prompt.video=4
+      --max-num-seqs 1
+      --quantization fp8
+      --enforce-eager
+    environment:
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - HF_TOKEN=${HF_TOKEN}
+
+  db:
+    platform: linux/amd64
+    image: postgres:18
+    container_name: postgres-tfg
+    restart: always
+    environment:
+      # Sincronizado con tu DATABASE_URL actual
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "3201Alex"
+      POSTGRES_DB: tfg
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: chromadb
+    restart: always
+    ports:
+      - "8004:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+  backend:
+    build: .
+    container_name: tfg-backend
+    depends_on:
+      - db
+      - chromadb
+      - vllm
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CARPETA_IMAGENES=/data/wikiart
+    volumes:
+      - ./:/app
+      - D:\wikiart:/data/wikiart:ro
+    working_dir: /app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-keep-alive", "300"]
+
+  ingest:
+    build: .
+    container_name: tfg-ingest
+    depends_on:
+      - db
+      - chromadb
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:3201Alex@db:5432/tfg
+      - CHROMA_USE_HTTP=true
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - CHROMA_SSL=false
+      - CHROMA_COLLECTION=wikiart
+      - CARPETA_IMAGENES=/data/wikiart
+    volumes:
+      - ./:/app
+      - D:\wikiart:/data/wikiart
+      - ./arte_db:/app/arte_db
+    working_dir: /app
+    command:
+      [
+        "/bin/sh",
+        "-c",
+        "until python -c \"import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('db', 5432)) == 0 else 1)\"; do echo 'waiting for db'; sleep 1; done && python ingestSQL.py",
+      ]
+
+  vllm_bench:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-bench
+    depends_on:
+      - vllm
+    profiles:
+      - bench
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+    - "pip install --no-cache-dir 'vllm[bench]' 'datasets' && vllm bench serve --backend openai-chat --base-url http://vllm:8000 --endpoint /v1/chat/completions --model Qwen/Qwen3-VL-8B-Instruct-FP8 --dataset-name hf --dataset-path lmarena-ai/VisionArena-Chat --num-prompts 1000 --request-rate 20"
+    volumes:
+      - vllm_cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - VLLM_TARGET_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+volumes:
+  vllm_cache:
+  chroma_data:
+  postgres_data:

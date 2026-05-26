@@ -1,61 +1,27 @@
 from fastapi import APIRouter, Depends, Response, Form, HTTPException
 from fastapi.responses import FileResponse
-from jose import jwt, JWTError
 from PIL import Image
 import io
 import os
-import config
-import uuid
+from app.core import config
 from uuid import UUID
-from database import get_chroma_collection
+from app.db.database import get_chroma_collection
 from chromadb.api import Collection
 from fastapi import Depends
-from fastapi.security import HTTPBearer, OAuth2PasswordBearer
-from model_loader import embedder
-from clases.ImageModel import ImageModel, ArtistModel
+from app.core.model_loader import embedder
+from app.clases.ImageModel import ImageModel, ArtistModel
 from fastapi import HTTPException, Depends
-from database import get_session
+from app.db.database import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from typing import Optional
-
-bearer_scheme = HTTPBearer(auto_error=False)
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-def get_current_user_id(token: str = Depends(oauth2_scheme)):
-    try:
-        payload = jwt.decode(token, config.SECRET_KEY, algorithms=[config.ALGORITHM])
-        print("DEBUG: Payload decodificado del token:", payload)
-        return payload["sub"]
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+from app.core.auth import get_current_user_id
 
 imagesRouter = APIRouter()
-collection = get_chroma_collection()
-
-
-def _artist_characteristics_sql(artist_alias: str) -> str:
-    return f"""
-        LEFT JOIN LATERAL (
-            SELECT g.name AS genre
-            FROM images AS i
-            INNER JOIN genres AS g ON i.genre_id = g.id
-            WHERE i.artist_id = {artist_alias}.id
-            GROUP BY g.name
-            ORDER BY COUNT(*) DESC, g.name
-            LIMIT 1
-        ) AS top_genre ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT s.name AS style
-            FROM images AS i
-            INNER JOIN styles AS s ON i.style_id = s.id
-            WHERE i.artist_id = {artist_alias}.id
-            GROUP BY s.name
-            ORDER BY COUNT(*) DESC, s.name
-            LIMIT 1
-        ) AS top_style ON TRUE
-    """
+from app.services.image_processing import (
+    _artist_characteristics_sql,
+    get_image_with_id,
+)
 
 @imagesRouter.get("/search")
 async def search_art(
@@ -79,10 +45,16 @@ async def search_art(
 
     query_artists = text(
         """
-        SELECT id, name, image
-        FROM artists
-        WHERE name ILIKE :query
-        ORDER BY (name ILIKE :prefix) DESC, name
+        SELECT
+            a.id,
+            a.name,
+            a.image,
+            top_genre.genre,
+            top_style.style
+        FROM artists AS a
+        """ + _artist_characteristics_sql("a") + """
+        WHERE a.name ILIKE :query
+        ORDER BY (a.name ILIKE :prefix) DESC, a.name
         LIMIT :limit
         """
     )
@@ -136,7 +108,13 @@ async def search_art(
 
     artists = []
     for row in artists_rows:
-        artista = ArtistModel(id=str(row['id']), name=row['name'], image_url=row['image'])
+        artista = ArtistModel(
+            id=str(row['id']),
+            name=row['name'],
+            image_url=row['image'],
+            genre=row.get('genre'),
+            style=row.get('style'),
+        )
         artists.append(artista)
 
     artworks = []
@@ -316,22 +294,6 @@ async def find_art(query: str = Form(...), collection: Collection = Depends(get_
     
     return {"art": art, "total_items": len(art)}
 
-DeprecationWarning("El endpoint /find_art está en desuso. Se recomienda usar /search/art con parámetros de búsqueda más específicos.")
-@imagesRouter.get("/art/{image_path:path}", deprecated=True)
-async def get_image_static(image_path: str):
-    """
-    Devuelve la imagen original sin procesar.
-    Para uso de VLLM y otros servicios que necesitan la imagen completa.
-    """
-    # Construir ruta completa
-    full_path = os.path.join(config.CARPETA_IMAGENES, image_path)
-    
-    # Verificar que el archivo existe
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail=f"Imagen no encontrada: {image_path}")
-    print(full_path)
-    return FileResponse(full_path, media_type="image/jpeg")
-
 @imagesRouter.get("/view/image_thumbnail/{image_path:path}")
 async def get_image_thumbnail(image_path: str, size: int = 600):
     """
@@ -458,82 +420,5 @@ async def get_recommended_artists(
         artists.append(artista)
     return {"artists": artists}
 
-async def get_image_with_id(image_id, session, user=None) -> ImageModel:
-    query_img = text("""SELECT i.id, i.local_route, i.owner_id, i.artist_id, 
-                     i.style_id, i.genre_id, i.name, i.year, 
-                     a.name AS artist, s.name AS style, g.name AS genre 
-                     FROM images AS i
-                     LEFT JOIN artists a ON i.artist_id = a.id 
-                     LEFT JOIN styles s ON i.style_id = s.id 
-                     LEFT JOIN genres g ON i.genre_id = g.id 
-                     WHERE i.id = :id and (i.owner_id = :user_id OR i.owner_id IS NULL)""")
-    result_img = await session.execute(query_img, {"id": image_id, "user_id": user})
-    image_db = result_img.mappings().one_or_none()
-    print(f"Resultado de la consulta de imagen con ID {image_id}: {image_db}")
-    if not image_db:
-        raise HTTPException(status_code=404, detail="Imagen no encontrada")
 
-    image_model = ImageModel(
-        id = str(image_db['id']),
-        owner_id = str(image_db['owner_id']),
-        artist_id=str(image_db['artist_id']),
-        style_id=str(image_db['style_id']),
-        genre_id=str(image_db['genre_id']),
-        name = image_db['name'],
-        artist = image_db['artist'],
-        style = image_db['style'],
-        genre = image_db['genre'],
-        year = image_db['year'],
-        image_url = image_db['local_route']
-    )
-    print("\n--------------------\n")
-    print(f"Imagen modelada con ID {image_id}: {image_model}")
-    print("\n--------------------\n")
 
-    return image_model
-
-async def save_image_and_get_data(contents, user, commit, session) -> ImageModel:
-    #Guardamos la imagen en el servidor para poder acceder a ella posteriormente y la añadimos a la BD
-    new_id = str(uuid.uuid4())
-    with open(os.path.join(config.CARPETA_IMAGENES, f"User/{new_id}.jpg"), 'wb') as img_file:
-        img_file.write(contents)
-    local_route = f"User/{new_id}.jpg"
-    
-    query_artist = text("SELECT id FROM artists WHERE name = :name")
-    artist_res = await session.execute(query_artist, {"name": "Unknown Artist"})
-    artist_id = artist_res.scalar_one_or_none()
-    
-    query_genre = text("SELECT id FROM genres WHERE name = :name")
-    genre_res = await session.execute(query_genre, {"name": "Unknown Genre"})
-    genre_id = genre_res.scalar_one_or_none()
-
-    query_style = text("SELECT id FROM styles WHERE name = :name")
-    style_res = await session.execute(query_style, {"name": "Unknown Style"})
-    style_id = style_res.scalar_one_or_none()
-    if not style_id:
-        style_id = str(uuid.uuid4())
-        query_insert_style = text("INSERT INTO styles (id, name) VALUES (:id, :name)")
-        await session.execute(query_insert_style, {"id": style_id, "name": "Unknown Style"})
-
-    query = text("""INSERT INTO images (id, local_route, owner_id, artist_id, style_id, genre_id) 
-                VALUES (:id, :local_route, :owner_id, :artist_id, :style_id, :genre_id) RETURNING id""")
-    result = await session.execute(query, {
-        "id": new_id,
-        "local_route": local_route,
-        "owner_id": user,
-        "artist_id": artist_id,
-        "style_id": style_id,
-        "genre_id": genre_id
-    })
-    if commit:
-        await session.commit()
-    return ImageModel(
-        id = new_id,
-        artist_id=str(artist_id),
-        style_id=str(style_id),
-        genre_id=str(genre_id),
-        name="Unknown",
-        year="Unknown",
-        owner_id = user,
-        image_url = local_route
-    )

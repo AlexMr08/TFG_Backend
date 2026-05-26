@@ -1,0 +1,37 @@
+# Exclude datasets and local databases
+wikiart
+images
+arte_db
+arte_db/**
+
+# Python caches
+__pycache__
+*.pyc
+
+# Git & editor
+.git
+.vscode
+.idea
+
+# Test/output
+htmlcov
+.pytest_cache
+coverage.xml
+
+# Virtual envs
+venv
+.venv
+ENV/
+
+# Node
+node_modules
+
+# Docker files
+docker-compose.override.yml
+
+# Large files
+*.tar
+*.zip
+*.ckpt
+*.pt
+*.safetensors
