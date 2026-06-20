@@ -18,7 +18,7 @@ from app.services.chat_processing import (
     get_internal_chat_id
 )
 from app.clases.Enums import Estados, TipoMensaje
-from app.clases.MessageInfo import MessageInfoV2
+from app.clases.message_info import MessageInfoV2
 
 
 # Un "fixture" de Pytest para darnos una sesión de base de datos falsa (mock) limpia en cada test

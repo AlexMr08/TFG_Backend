@@ -16,10 +16,10 @@ from app.core import config
 from app.services.chat_processing import add_related_images_2_db
 from app.routers.images import get_image_with_id
 from app.services.image_processing import encode_image_bytes, encode_image_file
-from app.clases.ChatModel import ChatModel
+from app.clases.chat_model import ChatModel
 from app.clases.Enums import Estados, TipoMensaje
-from app.clases.ImageModel import ImageModel
-from app.clases.MessageInfo import MessageInfoV2
+from app.clases.image_model import ImageModel
+from app.clases.message_info import MessageInfoV2
 from app.clases.Responses import CompleteChatResponse
 from app.db.database import AsyncSessionLocal
 

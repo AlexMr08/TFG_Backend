@@ -43,8 +43,14 @@ print("Iniciando API...")
 def root():
 	return {"message": "API para mi TFG funcionando.", "endpoints": ["/analyze, /search2, /view"]}
 
+
+@app.get("/health")
+def healthcheck():
+	return {"status": "ok"}
+
 @app.get("/collection-info")
 def collection_info():
 	view_database()
 
 __all__ = ["app"]
+

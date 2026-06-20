@@ -2,6 +2,7 @@ services:
   vllm:
     image: vllm/vllm-openai:latest
     container_name: vllm-windows
+    restart: unless-stopped
     # En Windows con WSL2, esto suele bastar para mapear la GPU
     deploy:
       resources:
@@ -19,9 +20,9 @@ services:
       --gpu-memory-utilization 0.85
       --max-model-len 6144
       --safetensors-load-strategy prefetch
+      --kv-cache-dtype fp8
       --limit-mm-per-prompt.video=0
-      --limit-mm-per-prompt.video=4
-      --max-num-seqs 1
+      --max-num-seqs 4
       --quantization fp8
       --enforce-eager
     environment:
@@ -38,10 +39,11 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: "3201Alex"
       POSTGRES_DB: tfg
+    command: ["postgres", "-c", "max_connections=300"]
     ports:
       - "5435:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
       interval: 5s
@@ -60,6 +62,7 @@ services:
   backend:
     build: .
     container_name: tfg-backend
+    restart: unless-stopped
     depends_on:
       - db
       - chromadb
@@ -77,9 +80,9 @@ services:
       - CARPETA_IMAGENES=/data/wikiart
     volumes:
       - ./:/app
-      - D:\wikiart:/data/wikiart:ro
+      - D:\wikiart:/data/wikiart
     working_dir: /app
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-keep-alive", "300"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--timeout-keep-alive", "300"]
 
   ingest:
     build: .
@@ -123,9 +126,10 @@ services:
               capabilities: [gpu]
     entrypoint: ["/bin/bash", "-lc"]
     command:
-    - "pip install --no-cache-dir 'vllm[bench]' 'datasets' && vllm bench serve --backend openai-chat --base-url http://vllm:8000 --endpoint /v1/chat/completions --model Qwen/Qwen3-VL-8B-Instruct-FP8 --dataset-name hf --dataset-path lmarena-ai/VisionArena-Chat --num-prompts 1000 --request-rate 20"
+    - "pip install --no-cache-dir 'vllm[bench]' 'datasets' && until curl -s http://vllm:8000/v1/models > /dev/null; do echo 'Esperando a que vLLM inicie...'; sleep 5; done && vllm bench serve --backend openai-chat --endpoint /v1/chat/completions --model Qwen/Qwen3-VL-8B-Instruct-FP8 --dataset-name random-mm --host vllm --port 8000 --request-rate 2.0 --num-prompts 50 | tee /app/benchmark_results.txt"
     volumes:
       - vllm_cache:/root/.cache/huggingface
+      - ./:/app
     environment:
       - HF_TOKEN=${HF_TOKEN}
       - VLLM_TARGET_DEVICE=cuda

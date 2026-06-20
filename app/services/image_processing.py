@@ -11,7 +11,7 @@ from sqlalchemy import text
 from fastapi import HTTPException
 from typing import Optional
 
-from app.clases.ImageModel import ImageModel
+from app.clases.image_model import ImageModel
 from app.core import config
 
 

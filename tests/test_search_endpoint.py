@@ -266,6 +266,10 @@ async def test_view_requires_auth(test_app):
 async def test_get_artists(test_app):
     token = create_access_token("testuser")
     headers = {"Authorization": f"Bearer {token}"}
+    async def override_get_session():
+        yield FakeSession(results=[FakeResult([]), FakeResult(scalar_value=0)])
+
+    test_app.dependency_overrides[get_session] = override_get_session
     transport = ASGITransport(app=test_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.get("/artists", headers=headers)

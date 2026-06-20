@@ -9,7 +9,7 @@ from app.db.database import get_chroma_collection
 from chromadb.api import Collection
 from fastapi import Depends
 from app.core.model_loader import embedder
-from app.clases.ImageModel import ImageModel, ArtistModel
+from app.clases.image_model import ImageModel, ArtistModel
 from fastapi import HTTPException, Depends
 from app.db.database import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -267,33 +267,6 @@ async def get_art_by_id(image_id: UUID, user: str = Depends(get_current_user_id)
     
     return image
 
-@imagesRouter.post("/find_art")
-async def find_art(query: str = Form(...), collection: Collection = Depends(get_chroma_collection)):
-    """
-    Busca arte por artista, estilo o género.
-    """
-    print(f"Buscando arte con query: {query}")
-    query_vector = embedder.encode(query, normalize_embeddings=True).tolist()
-    
-    results = collection.query(
-        query_embeddings=[query_vector],  # CAMBIAR query_texts por query_embeddings
-        include=['metadatas']
-    )
-    
-    art = []
-    for id, meta in zip(results['ids'][0], results['metadatas'][0]):
-        relative_path = meta['local_route']
-        image_url = f"/art/{relative_path}"
-        art.append({
-            "id": id,
-            "artist": meta['artist'],
-            "style": meta['style'],
-            "genre": meta['genre'],
-            "image_url": image_url
-        })
-    
-    return {"art": art, "total_items": len(art)}
-
 @imagesRouter.get("/view/image_thumbnail/{image_path:path}")
 async def get_image_thumbnail(image_path: str, size: int = 600):
     """
@@ -335,13 +308,6 @@ async def get_image_thumbnail(image_path: str, size: int = 600):
             return Response(content=img_byte_arr, media_type="image/jpeg")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar la imagen: {str(e)}")
-    
-@imagesRouter.get("/imagen/{filename}")
-async def get_image(filename: str):
-    full_path = os.path.join(config.CARPETA_IMAGENES, filename)
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="Imagen no encontrada")
-    return FileResponse(full_path, media_type="image/jpeg")
 
 @imagesRouter.get("/artists")
 async def get_artists(

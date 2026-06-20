@@ -4,9 +4,9 @@ from typing import Optional
 
 from sqlalchemy import text
 
-from app.clases.ChatModel import ChatModel
+from app.clases.chat_model import ChatModel
 from app.clases.Enums import Estados, TipoMensaje
-from app.clases.MessageInfo import MessageInfoV2
+from app.clases.message_info import MessageInfoV2
 
 
 async def add_created_msg(

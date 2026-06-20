@@ -1,10 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional
-from app.clases.UserModel import UserData
+from app.clases.user_model import UserData
 from pydantic import BaseModel
-from app.clases.ChatModel import ChatModel
-from app.clases.MessageInfo import MessageInfoV2
-from app.clases.ImageModel import ImageModel
+from app.clases.chat_model import ChatModel
+from app.clases.message_info import MessageInfoV2
+from app.clases.image_model import ImageModel
 from typing import Optional
 
 

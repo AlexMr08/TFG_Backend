@@ -7,14 +7,14 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
 from functools import partial
 from sqlalchemy import text
-from app.clases.ChatModel import ChatModel
-from app.clases.MessageInfo import MessageInfoV2
+from app.clases.chat_model import ChatModel
+from app.clases.message_info import MessageInfoV2
 from app.clases.Enums import TipoMensaje, Estados
 from typing import Optional
 from fastapi import Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_chroma_collection, get_session
-from app.clases.ImageModel import ImageModel
+from app.clases.image_model import ImageModel
 from uuid import UUID
 from app.clases.Responses import ChatListResponse, CompleteChatResponse
 from app.core.auth import get_current_user_id

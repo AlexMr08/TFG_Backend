@@ -12,7 +12,7 @@ from app.core import config
 from app.core.auth import get_firebase_user_from_token, create_access_token
 from app.db.database import get_session
 from app.clases.Responses import LoginResponse
-from app.clases.UserModel import UserData
+from app.clases.user_model import UserData
 from app.clases.Requests import CheckLoginRequest, CheckEmailRequest, SignUpWithGoogleRequest
 
 

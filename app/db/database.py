@@ -75,7 +75,7 @@ DATABASE_URL = config.DATABASE_URL
 DATABASE_URL2 = config.DATABASE_URL2
 
 # Engine created from centralized config DATABASE_URL
-engine = create_async_engine(DATABASE_URL, echo=True, future=True, pool_size=20, max_overflow=10)
+engine = create_async_engine(DATABASE_URL, echo=False, future=True, pool_size=30, max_overflow=20, pool_timeout=30)
 
 async def init_db():
     async with engine.begin() as conn:
@@ -98,7 +98,7 @@ def get_db_connection():
     global _postgres_client
     if _postgres_client is None:
         # Solo se inicializa si no existe
-        _postgres_client = create_async_engine(DATABASE_URL, echo=True, future=True)
+        _postgres_client = create_async_engine(DATABASE_URL, echo=False, future=True, pool_size=30, max_overflow=20, pool_timeout=30)
     return _postgres_client
 
 

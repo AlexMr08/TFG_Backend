@@ -230,7 +230,7 @@ class TestGetFirebaseUserFromToken:
 
     @patch("app.core.auth.verify_id_token")
     def test_returns_user_on_valid_token(self, mock_verify, valid_token, firebase_user):
-        """Token válido → devuelve el dict del usuario de Firebase"""
+        """Token válido → devuelve el dict del usuario"""
         mock_verify.return_value = firebase_user
 
         result = get_firebase_user_from_token(valid_token)
