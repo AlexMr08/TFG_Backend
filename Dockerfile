@@ -28,8 +28,9 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy only application code and necessary scripts (avoid large datasets/models)
+# `app/` already contains `app/clases/`, so copying `clases/` separately fails
+# when the build context doesn't have a top-level `clases/` directory.
 COPY app/ ./app/
-COPY clases/ ./clases/
 COPY ingestSQL.py ./ingestSQL.py
 COPY run_login_stress.ps1 ./run_login_stress.ps1
 COPY requirements.txt /app/requirements.txt
