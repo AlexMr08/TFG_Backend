@@ -36,9 +36,9 @@ services:
     restart: always
     environment:
       # Sincronizado con tu DATABASE_URL actual
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "3201Alex"
-      POSTGRES_DB: tfg
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-tfg}
     command: ["postgres", "-c", "max_connections=300"]
     ports:
       - "5435:5432"
@@ -91,7 +91,7 @@ services:
       - db
       - chromadb
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:3201Alex@db:5432/tfg
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tfg}
       - CHROMA_USE_HTTP=true
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
