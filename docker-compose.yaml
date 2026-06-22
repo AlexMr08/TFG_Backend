@@ -2,7 +2,6 @@ services:
   vllm:
     image: vllm/vllm-openai:latest
     container_name: vllm-windows
-    restart: unless-stopped
     # En Windows con WSL2, esto suele bastar para mapear la GPU
     deploy:
       resources:
@@ -25,20 +24,17 @@ services:
       --max-num-seqs 4
       --quantization fp8
       --enforce-eager
+    env_file:
+      - .env
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - HF_TOKEN=${HF_TOKEN}
-
   db:
     platform: linux/amd64
     image: postgres:18
     container_name: postgres-tfg
     restart: always
-    environment:
-      # Sincronizado con tu DATABASE_URL actual
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-tfg}
+    env_file:
+      - .env
     command: ["postgres", "-c", "max_connections=300"]
     ports:
       - "5435:5432"
@@ -62,7 +58,7 @@ services:
   backend:
     build: .
     container_name: tfg-backend
-    restart: unless-stopped
+    restart: always
     depends_on:
       - db
       - chromadb
@@ -90,14 +86,13 @@ services:
     depends_on:
       - db
       - chromadb
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tfg}
-      - CHROMA_USE_HTTP=true
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-      - CHROMA_SSL=false
-      - CHROMA_COLLECTION=wikiart
       - CARPETA_IMAGENES=/data/wikiart
+      - POSTGRES_HOST=db
     volumes:
       - ./:/app
       - D:\wikiart:/data/wikiart
@@ -130,8 +125,9 @@ services:
     volumes:
       - vllm_cache:/root/.cache/huggingface
       - ./:/app
+    env_file:
+      - .env
     environment:
-      - HF_TOKEN=${HF_TOKEN}
       - VLLM_TARGET_DEVICE=cuda
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
